@@ -1,0 +1,78 @@
+scripts/figure1_complete_final.Rmd:14:b73_full_path <- "/projects/standard/hirschc1/menar060/family_analysis/redo_full_sequence/B73/output/B73_full_sequence_silix.out"
+scripts/figure1_complete_final.Rmd:15:b73_5prime_path <- "/projects/standard/hirschc1/menar060/family_analysis/redo_five_prime/B73/output/B73_five_prime_silix.out"
+scripts/figure1_complete_final.Rmd:16:setaria_full_path <- "/projects/standard/hirschc1/menar060/family_analysis/redo_full_sequence/Setaria/output/Milhouse_plus_full_sequence_silix.out"
+scripts/figure1_complete_final.Rmd:17:setaria_5prime_path <- "/projects/standard/hirschc1/menar060/family_analysis/redo_five_prime/Setaria/output/Milhouse_plus_five_prime_silix.out"
+scripts/figure1_complete_final.Rmd:68:  f <- fread(
+scripts/figure1_complete_final.Rmd:72:  l <- fread(
+scripts/figure1_complete_final.Rmd:723:  file.path(output_dir,"Figure1_full_panel_FIXED_SPECIES_IDS.jpeg"),
+scripts/figure1_complete_final.Rmd:733:  file.path(output_dir,"Figure1_full_panel_FIXED_SPECIES_IDS.pdf"),
+scripts/figure2_complete.Rmd:39:b73_full_path <- paste0(
+scripts/figure2_complete.Rmd:44:b73_5prime_path <- paste0(
+scripts/figure2_complete.Rmd:49:setaria_full_path <- paste0(
+scripts/figure2_complete.Rmd:55:setaria_5prime_path <- paste0(
+scripts/figure2_complete.Rmd:183:b73_full_with_id <- data.table::fread(
+scripts/figure2_complete.Rmd:248:b73_five_with_id <- data.table::fread(
+scripts/figure2_complete.Rmd:322:setaria_full_with_id <- data.table::fread(
+scripts/figure2_complete.Rmd:396:setaria_five_raw <- data.table::fread(
+scripts/figure2_complete.Rmd:782:  full_dt <- data.table::fread(
+scripts/figure2_complete.Rmd:793:  five_prime_dt <- data.table::fread(
+scripts/figure2_complete.Rmd:2039:  filename = file.path(
+scripts/figure2_complete.Rmd:2053:  filename = file.path(
+scripts/figure3_complete.Rmd:41:b73_full_path <- paste0(
+scripts/figure3_complete.Rmd:47:b73_five_path <- paste0(
+scripts/figure3_complete.Rmd:54:setaria_full_path <- paste0(
+scripts/figure3_complete.Rmd:60:setaria_five_path <- paste0(
+scripts/figure3_complete.Rmd:72:setaria_gtf_path <- file.path(
+scripts/figure3_complete.Rmd:186:  data.table::fread(
+scripts/figure3_complete.Rmd:376:b73_gene_table <- data.table::fread(
+scripts/figure3_complete.Rmd:466:setaria_gtf <- data.table::fread(
+scripts/figure3_complete.Rmd:799:  file.path(output_dir, "Figure3_full_panel_ORIGINAL_ANALYSIS.jpeg"),
+scripts/figure3_complete.Rmd:809:  file.path(output_dir, "Figure3_full_panel_ORIGINAL_ANALYSIS.pdf"),
+scripts/figure3_complete.Rmd:819:  file.path(output_dir, "Figure3_gene_distance_summary.tsv"),
+scripts/figure3_complete.Rmd:827:  file.path(output_dir, "Figure3_1Mb_discordant_windows.tsv"),
+scripts/figure4_complete.Rmd:61:counts_path <- file.path(
+scripts/figure4_complete.Rmd:66:metadata_path <- file.path(
+scripts/figure4_complete.Rmd:71:fiveprime_silix_path <- paste0(
+scripts/figure4_complete.Rmd:146:raw_counts <- readr::read_tsv(
+scripts/figure4_complete.Rmd:483:silix_raw <- readr::read_tsv(
+scripts/figure4_complete.Rmd:1451:  file.path(
+scripts/figure4_complete.Rmd:1740:  filename = file.path(
+scripts/figure4_complete.Rmd:1753:  filename = file.path(
+scripts/figure4_complete.Rmd:1767:  filename = file.path(
+scripts/figure4_complete.Rmd:1783:  filename = file.path(
+scripts/figure4_complete.Rmd:1856:  filename = file.path(
+scripts/figure4_complete.Rmd:1870:  filename = file.path(
+scripts/figure4_complete.Rmd:1928:  file.path(
+scripts/figure4_complete.Rmd:1933:  file.path(
+scripts/figure5_complete.Rmd:41:fiveprime_silix_path <-
+scripts/figure5_complete.Rmd:51:panelC_path <- file.path(
+scripts/figure5_complete.Rmd:57:  file.path(analysis_dir, "PanelB_expression_clusters_per_5prime_family.tsv"),
+scripts/figure5_complete.Rmd:58:  file.path(analysis_dir, "PanelB_expression_cluster_occupancy_distribution.tsv"),
+scripts/figure5_complete.Rmd:59:  file.path(analysis_dir, "PanelD_family_size_vs_expression_cluster_occupancy.tsv")
+scripts/figure5_complete.Rmd:62:panelD_path <- panelD_candidates[file.exists(panelD_candidates)][1]
+scripts/figure5_complete.Rmd:74:panelC_data <- readr::read_tsv(panelC_path, show_col_types = FALSE)
+scripts/figure5_complete.Rmd:75:family_level_data <- readr::read_tsv(panelD_path, show_col_types = FALSE)
+scripts/figure5_complete.Rmd:107:  readr::read_tsv(
+scripts/figure5_complete.Rmd:144:silix_raw <- readr::read_tsv(
+scripts/figure5_complete.Rmd:490:  file.path(output_dir, "Figure5_FINAL.jpeg"),
+scripts/figure5_complete.Rmd:500:  file.path(output_dir, "Figure5_FINAL.pdf"),
+scripts/figure5_complete.Rmd:514:  file.path(output_dir, "Figure5_PanelA_top17_family_identity.tsv")
+scripts/figure5_complete.Rmd:519:  file.path(output_dir, "Figure5_top17_expressed_5prime_families.tsv")
+scripts/figure6_complete.Rmd:39:b73_status_path <-
+scripts/figure6_complete.Rmd:42:umr_overlap_path <-
+scripts/figure6_complete.Rmd:43:  file.path(
+scripts/figure6_complete.Rmd:48:counts_path <-
+scripts/figure6_complete.Rmd:49:  file.path(
+scripts/figure6_complete.Rmd:54:metadata_path <-
+scripts/figure6_complete.Rmd:55:  file.path(
+scripts/figure6_complete.Rmd:64:  file.path(
+scripts/figure6_complete.Rmd:100:b73_te_assignments <- readr::read_tsv(
+scripts/figure6_complete.Rmd:158:umr_overlap <- read.table(
+scripts/figure6_complete.Rmd:238:raw_counts <- readr::read_tsv(
+scripts/figure6_complete.Rmd:999:  filename = file.path(
+scripts/figure6_complete.Rmd:1012:  filename = file.path(
+scripts/figure6_complete.Rmd:1029:  file.path(
+scripts/figure6_complete.Rmd:1037:  file.path(
+scripts/figure6_complete.Rmd:1058:  file.path(
+scripts/figure6_complete.Rmd:1069:  file.path(
+scripts/figure6_complete.Rmd:1074:  file.path(

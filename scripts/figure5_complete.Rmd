@@ -1,0 +1,545 @@
+---
+title: "figure5_complete"
+output: html_document
+date: "2026-09-28"
+---
+
+```{r}
+# ==============================================================================
+# FIGURE 5 — REVISED STANDALONE SCRIPT
+#
+# A. Pairwise 5' LTR identity for the 17 largest expressed 5' LTR families
+#    using the EXISTING within-expression-cluster VSEARCH comparisons.
+# B. Pairwise 5' LTR identity within the 17 expression clusters.
+# C. Number of 5' LTR families represented per expression cluster.
+# D. Number of expression clusters occupied per 5' LTR family.
+#
+# NOTE FOR PANEL A:
+# This intentionally reuses the old working pairwise analysis. Therefore,
+# Panel A includes same-family pairs that were compared within an expression
+# cluster; it does not generate new across-cluster pairwise comparisons.
+# ==============================================================================
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(tibble)
+  library(readr)
+  library(purrr)
+  library(stringr)
+  library(ggplot2)
+  library(patchwork)
+  library(scales)
+})
+
+analysis_dir <-
+  "/projects/standard/hirschc1/menar060/family_analysis/expression_cluster_sequence_identity/figures"
+
+vsearch_dir <-
+  "/projects/standard/hirschc1/menar060/family_analysis/expression_cluster_sequence_identity/vsearch"
+
+fiveprime_silix_path <-
+  "/projects/standard/hirschc1/menar060/family_analysis/redo_five_prime/B73/output/B73_five_prime_silix.out"
+
+output_dir <- "/users/2/menar060/final_panel_figures"
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+
+# ==============================================================================
+# 1. LOAD THE SAME SAVED TABLES USED BY THE OLD WORKING FIGURE
+# ==============================================================================
+
+panelC_path <- file.path(
+  analysis_dir,
+  "PanelA_5prime_families_per_expression_cluster.tsv"
+)
+
+panelD_candidates <- c(
+  file.path(analysis_dir, "PanelB_expression_clusters_per_5prime_family.tsv"),
+  file.path(analysis_dir, "PanelB_expression_cluster_occupancy_distribution.tsv"),
+  file.path(analysis_dir, "PanelD_family_size_vs_expression_cluster_occupancy.tsv")
+)
+
+panelD_path <- panelD_candidates[file.exists(panelD_candidates)][1]
+
+if (!file.exists(panelC_path)) {
+  stop("Missing old Panel A data: ", panelC_path)
+}
+if (length(panelD_path) == 0 || is.na(panelD_path)) {
+  stop("Could not find the saved family-level occupancy table.")
+}
+if (!file.exists(fiveprime_silix_path)) {
+  stop("Missing 5' LTR SiLiX output: ", fiveprime_silix_path)
+}
+
+panelC_data <- readr::read_tsv(panelC_path, show_col_types = FALSE)
+family_level_data <- readr::read_tsv(panelD_path, show_col_types = FALSE)
+
+# ==============================================================================
+# 2. READ THE EXISTING 17 EXPRESSION-CLUSTER VSEARCH FILES
+# ==============================================================================
+
+vsearch_files <- list.files(
+  vsearch_dir,
+  pattern = "^cluster_[0-9]+_5prime_allpairs\\.tsv$",
+  full.names = TRUE
+)
+
+if (length(vsearch_files) != 17) {
+  stop(
+    "Expected 17 existing VSEARCH files but found ",
+    length(vsearch_files),
+    " in ",
+    vsearch_dir
+  )
+}
+
+blast6_columns <- c(
+  "Query", "Target", "Percent_Identity", "Alignment_Length",
+  "Mismatches", "Gap_Opens", "Query_Start", "Query_End",
+  "Target_Start", "Target_End", "Evalue", "Bit_Score"
+)
+
+read_cluster_vsearch <- function(file) {
+  cluster_number <- basename(file) %>%
+    stringr::str_extract("(?<=cluster_)\\d+") %>%
+    as.integer()
+
+  readr::read_tsv(
+    file,
+    col_names = blast6_columns,
+    show_col_types = FALSE
+  ) %>%
+    dplyr::mutate(Expression_Cluster = cluster_number, .before = 1)
+}
+
+pairwise_raw <- purrr::map_dfr(vsearch_files, read_cluster_vsearch)
+
+# Clean IDs and collapse reciprocal pairs within each expression cluster.
+pairwise_identity <- pairwise_raw %>%
+  dplyr::mutate(
+    Query_lLTR_ID = stringr::str_extract(Query, "lLTR_[0-9]+"),
+    Target_lLTR_ID = stringr::str_extract(Target, "lLTR_[0-9]+")
+  ) %>%
+  dplyr::filter(
+    !is.na(Query_lLTR_ID),
+    !is.na(Target_lLTR_ID),
+    Query_lLTR_ID != Target_lLTR_ID,
+    !is.na(Percent_Identity)
+  ) %>%
+  dplyr::mutate(
+    Pair_1 = pmin(Query_lLTR_ID, Target_lLTR_ID),
+    Pair_2 = pmax(Query_lLTR_ID, Target_lLTR_ID)
+  ) %>%
+  dplyr::distinct(
+    Expression_Cluster,
+    Pair_1,
+    Pair_2,
+    .keep_all = TRUE
+  )
+
+# ==============================================================================
+# 3. CORRECTLY PARSE THE EXISTING SiLiX FAMILY ASSIGNMENTS
+# ==============================================================================
+
+silix_raw <- readr::read_tsv(
+  fiveprime_silix_path,
+  col_names = c("Five_Prime_Family_ID", "Attributes"),
+  show_col_types = FALSE
+)
+
+fiveprime_lookup <- silix_raw %>%
+  dplyr::mutate(
+    lLTR_ID = sub("^ID=([^;]+);.*$", "\\1", Attributes)
+  ) %>%
+  dplyr::select(lLTR_ID, Five_Prime_Family_ID) %>%
+  dplyr::filter(!is.na(lLTR_ID), !is.na(Five_Prime_Family_ID)) %>%
+  dplyr::distinct()
+
+# Map both members of every existing pair to their 5' LTR family.
+pairwise_with_families <- pairwise_identity %>%
+  dplyr::left_join(
+    fiveprime_lookup %>%
+      dplyr::rename(
+        Query_lLTR_ID = lLTR_ID,
+        Query_5prime_Family = Five_Prime_Family_ID
+      ),
+    by = "Query_lLTR_ID"
+  ) %>%
+  dplyr::left_join(
+    fiveprime_lookup %>%
+      dplyr::rename(
+        Target_lLTR_ID = lLTR_ID,
+        Target_5prime_Family = Five_Prime_Family_ID
+      ),
+    by = "Target_lLTR_ID"
+  )
+
+# ==============================================================================
+# 4. IDENTIFY THE 17 LARGEST EXPRESSED 5' LTR FAMILIES
+# ==============================================================================
+
+# Prefer the saved family-level table because it already contains Number_TEs.
+if (all(c("Five_Prime_Family", "Number_TEs") %in% names(family_level_data))) {
+
+  top17_families <- family_level_data %>%
+    dplyr::select(Five_Prime_Family, Number_TEs) %>%
+    dplyr::distinct() %>%
+    dplyr::arrange(dplyr::desc(Number_TEs), Five_Prime_Family) %>%
+    dplyr::slice_head(n = 17)
+
+} else {
+
+  # Fallback: count unique lLTR IDs represented in the existing pairwise data.
+  expressed_family_members <- dplyr::bind_rows(
+    pairwise_with_families %>%
+      dplyr::transmute(
+        lLTR_ID = Query_lLTR_ID,
+        Five_Prime_Family = Query_5prime_Family
+      ),
+    pairwise_with_families %>%
+      dplyr::transmute(
+        lLTR_ID = Target_lLTR_ID,
+        Five_Prime_Family = Target_5prime_Family
+      )
+  ) %>%
+    dplyr::filter(!is.na(Five_Prime_Family)) %>%
+    dplyr::distinct()
+
+  top17_families <- expressed_family_members %>%
+    dplyr::count(Five_Prime_Family, name = "Number_TEs") %>%
+    dplyr::arrange(dplyr::desc(Number_TEs), Five_Prime_Family) %>%
+    dplyr::slice_head(n = 17)
+}
+
+cat("\n17 largest expressed 5' LTR families:\n")
+print(top17_families, n = Inf)
+
+# ==============================================================================
+# 5. NEW PANEL A
+# SAME-FAMILY PAIRWISE IDENTITY FOR THE TOP 17 FAMILIES
+# ==============================================================================
+
+panelA_data <- pairwise_with_families %>%
+  dplyr::filter(
+    !is.na(Query_5prime_Family),
+    !is.na(Target_5prime_Family),
+    Query_5prime_Family == Target_5prime_Family,
+    Query_5prime_Family %in% top17_families$Five_Prime_Family
+  ) %>%
+  dplyr::transmute(
+    Five_Prime_Family = Query_5prime_Family,
+    Percent_Identity
+  ) %>%
+  dplyr::left_join(top17_families, by = "Five_Prime_Family") %>%
+  dplyr::mutate(
+    Five_Prime_Family = factor(
+      Five_Prime_Family,
+      levels = top17_families$Five_Prime_Family
+    )
+  )
+
+if (nrow(panelA_data) == 0) {
+  stop(
+    "Panel A is empty after family matching. ",
+    "Inspect the SiLiX ID parsing and family names."
+  )
+}
+
+cat("\nPanel A families with pairwise comparisons: ",
+    dplyr::n_distinct(panelA_data$Five_Prime_Family), "\n", sep = "")
+
+print(
+  panelA_data %>%
+    dplyr::count(Five_Prime_Family, Number_TEs, name = "Number_Pairs"),
+  n = Inf
+)
+
+pA <- ggplot2::ggplot(
+  panelA_data,
+  ggplot2::aes(
+    x = Five_Prime_Family,
+    y = Percent_Identity
+  )
+) +
+  ggplot2::geom_boxplot(
+    width = 0.70,
+    outlier.shape = NA,
+    linewidth = 0.45,
+    fill = "grey40"
+  ) +
+  ggplot2::geom_hline(
+    yintercept = 80,
+    linetype = "dashed",
+    linewidth = 0.5
+  ) +
+  ggplot2::scale_y_continuous(
+    limits = c(35, 100),
+    breaks = c(40, 50, 60, 70, 80, 90, 100)
+  ) +
+  ggplot2::labs(
+    x = "5' LTR family",
+    y = "Pairwise 5' LTR\nsequence identity (%)"
+  ) +
+  ggplot2::theme_classic(base_size = 11) +
+  ggplot2::theme(
+    axis.title = ggplot2::element_text(face = "bold"),
+    axis.text.x = ggplot2::element_text(
+      angle = 45,
+      hjust = 1,
+      vjust = 1,
+      size = 7.5
+    )
+  )
+
+# ==============================================================================
+# 6. PANEL B
+# PAIRWISE IDENTITY WITHIN EACH EXPRESSION CLUSTER
+# ==============================================================================
+
+panelB_data <- pairwise_identity %>%
+  dplyr::mutate(
+    Expression_Cluster = factor(
+      Expression_Cluster,
+      levels = 1:17
+    )
+  )
+
+pB <- ggplot2::ggplot(
+  panelB_data,
+  ggplot2::aes(
+    x = Expression_Cluster,
+    y = Percent_Identity
+  )
+) +
+  ggplot2::geom_boxplot(
+    width = 0.70,
+    outlier.shape = NA,
+    linewidth = 0.45,
+    fill = "grey55"
+  ) +
+  ggplot2::geom_hline(
+    yintercept = 80,
+    linetype = "dashed",
+    linewidth = 0.5
+  ) +
+  ggplot2::scale_y_continuous(
+    limits = c(35, 100),
+    breaks = c(40, 50, 60, 70, 80, 90, 100)
+  ) +
+  ggplot2::labs(
+    x = "Expression cluster",
+    y = "Pairwise 5' LTR\nsequence identity (%)"
+  ) +
+  ggplot2::theme_classic(base_size = 11) +
+  ggplot2::theme(
+    axis.title = ggplot2::element_text(face = "bold"),
+    axis.text.x = ggplot2::element_text(size = 8)
+  )
+
+# ==============================================================================
+# 7. PANEL C — OLD PANEL A
+# ==============================================================================
+
+panelC_data <- panelC_data %>%
+  dplyr::mutate(
+    Expression_Cluster = factor(
+      as.character(Expression_Cluster),
+      levels = as.character(1:17)
+    )
+  ) %>%
+  dplyr::arrange(Expression_Cluster)
+
+pC <- ggplot2::ggplot(
+  panelC_data,
+  ggplot2::aes(
+    x = Expression_Cluster,
+    y = Number_5prime_Families
+  )
+) +
+  ggplot2::geom_col(width = 0.75, fill = "grey40") +
+  ggplot2::geom_text(
+    ggplot2::aes(label = Number_5prime_Families),
+    vjust = -0.4,
+    size = 3
+  ) +
+  ggplot2::scale_y_continuous(
+    expand = ggplot2::expansion(mult = c(0, 0.14))
+  ) +
+  ggplot2::labs(
+    x = "Expression cluster",
+    y = "5' LTR families\nper expression cluster"
+  ) +
+  ggplot2::theme_classic(base_size = 11) +
+  ggplot2::theme(
+    axis.title = ggplot2::element_text(face = "bold"),
+    axis.text.x = ggplot2::element_text(size = 8)
+  )
+
+# ==============================================================================
+# 8. PANEL D — OLD PANEL B
+# ==============================================================================
+
+if (all(
+  c("Number_Expression_Clusters", "Number_5prime_Families") %in%
+    names(family_level_data)
+)) {
+
+  panelD_data <- family_level_data %>%
+    dplyr::select(Number_Expression_Clusters, Number_5prime_Families) %>%
+    dplyr::distinct()
+
+} else if (all(
+  c("Number_Expression_Clusters", "Five_Prime_Family") %in%
+    names(family_level_data)
+)) {
+
+  panelD_data <- family_level_data %>%
+    dplyr::count(
+      Number_Expression_Clusters,
+      name = "Number_5prime_Families"
+    )
+
+} else {
+  stop("Could not construct Panel D from the saved family-level table.")
+}
+
+panelD_data <- panelD_data %>%
+  tidyr::complete(
+    Number_Expression_Clusters = 1:17,
+    fill = list(Number_5prime_Families = 0)
+  ) %>%
+  dplyr::arrange(Number_Expression_Clusters)
+
+total_5prime_families <- sum(panelD_data$Number_5prime_Families)
+
+one_cluster_families <- panelD_data %>%
+  dplyr::filter(Number_Expression_Clusters == 1) %>%
+  dplyr::pull(Number_5prime_Families)
+
+percent_one_cluster <- 100 * one_cluster_families / total_5prime_families
+
+pD <- ggplot2::ggplot(
+  panelD_data,
+  ggplot2::aes(
+    x = factor(Number_Expression_Clusters, levels = 1:17),
+    y = Number_5prime_Families
+  )
+) +
+  ggplot2::geom_col(width = 0.75, fill = "grey40") +
+  # Label only the first (single-cluster) bar.
+  # Shift the label to the right so it does not collide with the y-axis.
+  ggplot2::annotate(
+    "text",
+    x = 1.65,
+    # Keep the label comfortably below the top of the panel.
+    y = one_cluster_families +
+      0.025 * max(panelD_data$Number_5prime_Families),
+    label = paste0(
+      scales::comma(one_cluster_families),
+      " families\n(",
+      round(percent_one_cluster, 1),
+      "%)"
+    ),
+    hjust = 0,
+    vjust = 0,
+    fontface = "bold",
+    size = 3.4
+  ) +
+  # Fix Panel D y-axis at 0–2,000 so the first-bar label has ample room.
+  ggplot2::scale_y_continuous(
+    limits = c(0, 2000),
+    breaks = c(0, 500, 1000, 1500, 2000),
+    labels = scales::comma,
+    expand = ggplot2::expansion(mult = c(0, 0))
+  ) +
+  ggplot2::labs(
+    x = "Expression clusters occupied",
+    y = "Number of\n5' LTR families"
+  ) +
+  ggplot2::theme_classic(base_size = 11) +
+  ggplot2::theme(
+    axis.title = ggplot2::element_text(face = "bold"),
+    axis.text.x = ggplot2::element_text(size = 8)
+  )
+
+# ==============================================================================
+# 9. COMBINE
+# ==============================================================================
+
+figure5_final <- (pA | pB) / (pC | pD) +
+  patchwork::plot_layout(widths = c(1, 1), heights = c(1, 1)) +
+  patchwork::plot_annotation(
+    tag_levels = "A"
+  ) &
+  ggplot2::theme(
+    # Apply directly to every panel tag in the completed patchwork.
+    plot.tag = ggplot2::element_text(
+      face = "bold",
+      size = 19
+    ),
+    plot.tag.position = c(0.01, 0.99)
+  )
+
+print(figure5_final)
+
+# ==============================================================================
+# 10. SAVE
+# ==============================================================================
+
+ggplot2::ggsave(
+  file.path(output_dir, "Figure5_FINAL.jpeg"),
+  figure5_final,
+  width = 12,
+  height = 9,
+  units = "in",
+  dpi = 600,
+  bg = "white"
+)
+
+ggplot2::ggsave(
+  file.path(output_dir, "Figure5_FINAL.pdf"),
+  figure5_final,
+  width = 12,
+  height = 9,
+  units = "in",
+  bg = "white"
+)
+
+# Save the new Panel A data so it can be inspected directly.
+readr::write_tsv(
+  panelA_data %>%
+    dplyr::mutate(
+      Five_Prime_Family = as.character(Five_Prime_Family)
+    ),
+  file.path(output_dir, "Figure5_PanelA_top17_family_identity.tsv")
+)
+
+readr::write_tsv(
+  top17_families,
+  file.path(output_dir, "Figure5_top17_expressed_5prime_families.tsv")
+)
+
+cat(
+  "\n============================================================\n",
+  "FIGURE 5 COMPLETE\n",
+  "============================================================\n",
+  "Panel A families plotted: ",
+  dplyr::n_distinct(panelA_data$Five_Prime_Family),
+  "\nPanel B expression clusters plotted: ",
+  dplyr::n_distinct(panelB_data$Expression_Cluster),
+  "\nPanel D one-cluster families: ",
+  one_cluster_families,
+  " / ",
+  total_5prime_families,
+  " (",
+  round(percent_one_cluster, 1),
+  "%)\n",
+  "Output directory: ",
+  output_dir,
+  "\n",
+  sep = ""
+)
+
+```
+
+

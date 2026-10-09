@@ -1,0 +1,1948 @@
+---
+title: "figure4_complete"
+output: html_document
+date: "2026-09-28"
+---
+
+
+```{r}
+# ==============================================================================
+# FIGURE 4 — FINAL FOUR-PANEL VERSION
+#
+# A: Top 17 largest represented 5′ LTR families — expression heatmap
+# B: 5′ LTR family RL000019 — Control / Cold / Heat TE profiles
+# C: Data-driven heterogeneous 5′ LTR family — all five conditions, gray lines
+# D: k = 17 expression-cluster heatmap — readable condition/replicate labels
+#
+# Panel A and the RL000019 analysis are retained from the original Figure 4.
+# ==============================================================================
+
+
+
+# ==============================================================================
+# FIGURE 4 — FINAL STANDALONE SCRIPT
+#
+# Reproduces the THREE plots shown on Slide 4 of the rough-draft PowerPoint:
+#
+#   A. Individual-TE expression heatmap grouped by 5′ LTR SiLiX family
+#   B. All variable expressed structural-TE heatmap
+#   C. RL000019 individual-TE Control/Cold/Heat expression profiles
+#
+# This script is completely independent and can be run from a clean R session.
+# ==============================================================================
+
+
+# ==============================================================================
+# 1. PACKAGES
+# ==============================================================================
+
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(readr)
+library(ggplot2)
+library(pheatmap)
+library(matrixStats)
+library(scales)
+library(patchwork)
+library(gtable)
+library(grid)
+
+
+# ==============================================================================
+# 2. PATHS
+# ==============================================================================
+
+scratch_dir <- paste0(
+  "/projects/standard/hirschc1/menar060/",
+  "stress_scratch_copy/stress_scratch"
+)
+
+counts_path <- file.path(
+  scratch_dir,
+  "raw_counts_structural_LTRs_only.txt"
+)
+
+metadata_path <- file.path(
+  scratch_dir,
+  "metadata.csv"
+)
+
+fiveprime_silix_path <- paste0(
+  "/projects/standard/hirschc1/menar060/",
+  "family_analysis/redo_five_prime/B73/output/",
+  "B73_five_prime_silix.out"
+)
+
+output_dir <- "/users/2/menar060/final_panel_figures"
+
+dir.create(
+  output_dir,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+
+# ==============================================================================
+# 3. COLORS
+# ==============================================================================
+
+divergent_palette <- c(
+  "#27408B",
+  "#1B9E77",
+  "#2AA198",
+  "#56B4E9",
+  "#E6AB02",
+  "#D55E6A",
+  "#984EA3",
+  "#7F1D3A"
+)
+
+condition_colors <- c(
+  "control" = "#777777",
+  "heat" = divergent_palette[8],
+  "cold" = divergent_palette[4],
+  "salt" = divergent_palette[2],
+  "UV" = divergent_palette[5]
+)
+
+heatmap_colors <- grDevices::colorRampPalette(
+  c(
+    divergent_palette[1],
+    "white",
+    divergent_palette[8]
+  )
+)(101)
+
+
+# ==============================================================================
+# 4. READ METADATA
+# ==============================================================================
+
+metadata <- read.csv(
+  metadata_path,
+  check.names = FALSE
+)
+
+if ("SampleID" %in% names(metadata)) {
+  rownames(metadata) <- metadata$SampleID
+} else {
+  rownames(metadata) <- metadata[[1]]
+}
+
+if (!"Condition" %in% names(metadata)) {
+  stop("metadata.csv must contain a Condition column.")
+}
+
+metadata$Condition <- as.character(
+  metadata$Condition
+)
+
+
+# ==============================================================================
+# 5. READ STRUCTURAL-TE FEATURECOUNTS MATRIX
+# ==============================================================================
+
+raw_counts <- readr::read_tsv(
+  counts_path,
+  comment = "#",
+  show_col_types = FALSE
+)
+
+if (!"Geneid" %in% names(raw_counts)) {
+  stop("Geneid column not found in count matrix.")
+}
+
+annotation_columns <- c(
+  "Geneid",
+  "Chr",
+  "Start",
+  "End",
+  "Strand",
+  "Length"
+)
+
+sample_columns <- setdiff(
+  names(raw_counts),
+  annotation_columns
+)
+
+count_df <- raw_counts %>%
+  dplyr::select(
+    Geneid,
+    dplyr::all_of(sample_columns)
+  ) %>%
+  as.data.frame()
+
+rownames(count_df) <- count_df$Geneid
+count_df$Geneid <- NULL
+
+
+# ==============================================================================
+# 6. CLEAN SAMPLE NAMES
+# ==============================================================================
+
+clean_sample_name <- function(x) {
+
+  x <- basename(x)
+
+  x <- sub(
+    "_Aligned.*$",
+    "",
+    x
+  )
+
+  x <- sub(
+    "\\.bam$",
+    "",
+    x
+  )
+
+  x
+}
+
+colnames(count_df) <- clean_sample_name(
+  colnames(count_df)
+)
+
+count_df[] <- lapply(
+  count_df,
+  as.numeric
+)
+
+
+# ==============================================================================
+# 7. MATCH COUNTS TO METADATA
+# ==============================================================================
+
+common_samples <- intersect(
+  colnames(count_df),
+  rownames(metadata)
+)
+
+if (length(common_samples) < 2) {
+  stop("Fewer than two samples matched between counts and metadata.")
+}
+
+count_df <- count_df[
+  ,
+  common_samples,
+  drop = FALSE
+]
+
+metadata <- metadata[
+  common_samples,
+  ,
+  drop = FALSE
+]
+
+stopifnot(
+  identical(
+    colnames(count_df),
+    rownames(metadata)
+  )
+)
+
+
+# ==============================================================================
+# 8. EXPRESSION FILTER
+#
+# Same analysis used for the Slide-4 heatmaps:
+#   >1 assigned read equivalent in at least 2 samples
+# ==============================================================================
+
+count_matrix <- as.matrix(
+  count_df
+)
+
+storage.mode(count_matrix) <- "numeric"
+
+minimum_count <- 1
+minimum_samples <- 2
+
+keep_expressed <- rowSums(
+  count_matrix > minimum_count
+) >= minimum_samples
+
+count_matrix_filtered <- count_matrix[
+  keep_expressed,
+  ,
+  drop = FALSE
+]
+
+
+# ==============================================================================
+# 9. CPM + LOG2(CPM + 1)
+# ==============================================================================
+
+library_sizes <- colSums(
+  count_matrix_filtered
+)
+
+cpm_matrix <- sweep(
+  count_matrix_filtered,
+  2,
+  library_sizes,
+  "/"
+) * 1000000
+
+log_cpm_matrix <- log2(
+  cpm_matrix + 1
+)
+
+
+# ==============================================================================
+# 10. REMOVE ZERO-VARIANCE TES
+# ==============================================================================
+
+te_variance <- matrixStats::rowVars(
+  log_cpm_matrix
+)
+
+keep_variable <- is.finite(
+  te_variance
+) &
+  te_variance > 0
+
+log_cpm_variable <- log_cpm_matrix[
+  keep_variable,
+  ,
+  drop = FALSE
+]
+
+
+# ==============================================================================
+# 11. SCALE EXPRESSION WITHIN EACH TE
+# ==============================================================================
+
+scaled_expression <- t(
+  scale(
+    t(
+      log_cpm_variable
+    )
+  )
+)
+
+valid_scaled_rows <- apply(
+  scaled_expression,
+  1,
+  function(x) {
+    all(
+      is.finite(x)
+    )
+  }
+)
+
+scaled_expression <- scaled_expression[
+  valid_scaled_rows,
+  ,
+  drop = FALSE
+]
+
+
+# ==============================================================================
+# 12. SAMPLE ANNOTATION
+# ==============================================================================
+
+sample_annotation <- data.frame(
+  Condition =
+    metadata[
+      colnames(scaled_expression),
+      "Condition"
+    ]
+)
+
+rownames(sample_annotation) <- colnames(
+  scaled_expression
+)
+
+annotation_colors <- list(
+  Condition =
+    condition_colors[
+      intersect(
+        names(condition_colors),
+        unique(
+          as.character(
+            sample_annotation$Condition
+          )
+        )
+      )
+    ]
+)
+
+
+# ==============================================================================
+# 13. HUMAN-READABLE SAMPLE LABELS
+# ==============================================================================
+
+sample_label_map <- c(
+  "SRR1238715" = "Heat rep 1",
+  "SRR1819196" = "Heat rep 2",
+  "SRR1819198" = "Heat rep 3",
+
+  "SRR1238717" = "Cold rep 1",
+  "SRR1819204" = "Cold rep 2",
+  "SRR1819205" = "Cold rep 3",
+
+  "SRR1238718" = "Control rep 1",
+  "SRR1819617" = "Control rep 2",
+  "SRR1819621" = "Control rep 3",
+
+  "SRR1238719" = "Salt",
+  "SRR1238720" = "UV"
+)
+
+missing_sample_labels <- setdiff(
+  colnames(scaled_expression),
+  names(sample_label_map)
+)
+
+if (length(missing_sample_labels) > 0) {
+  stop(
+    "The following samples are missing labels: ",
+    paste(
+      missing_sample_labels,
+      collapse = ", "
+    )
+  )
+}
+
+scaled_expression_labeled <- scaled_expression
+
+colnames(
+  scaled_expression_labeled
+) <- unname(
+  sample_label_map[
+    colnames(scaled_expression)
+  ]
+)
+
+sample_annotation_labeled <- sample_annotation
+
+rownames(
+  sample_annotation_labeled
+) <- unname(
+  sample_label_map[
+    rownames(sample_annotation)
+  ]
+)
+
+sample_annotation_labeled <- sample_annotation_labeled[
+  colnames(scaled_expression_labeled),
+  ,
+  drop = FALSE
+]
+
+
+# ==============================================================================
+# 14. HELPER HEATMAP — PRESERVE PANEL A COLUMN CLUSTERING
+#
+# This is NOT a displayed panel.
+#
+# The original Figure 4 Panel A borrowed the sample/column dendrogram from the
+# all-variable-TE heatmap. We retain that exact helper analysis here so Panel A
+# is not changed when the displayed heatmap is moved to Panel D.
+# ==============================================================================
+
+all_te_heatmap_result <- pheatmap::pheatmap(
+  scaled_expression_labeled,
+
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  clustering_method = "average",
+
+  show_rownames = FALSE,
+  show_colnames = FALSE,
+
+  annotation_col =
+    sample_annotation_labeled,
+
+  annotation_colors =
+    annotation_colors,
+
+  color =
+    heatmap_colors,
+
+  breaks =
+    seq(
+      -3,
+      3,
+      length.out = 102
+    ),
+
+  border_color = NA,
+  main = "",
+  silent = TRUE
+)
+
+
+# ==============================================================================
+# 15. READ 5′ LTR SILIX FAMILY ASSIGNMENTS
+# ==============================================================================
+
+silix_raw <- readr::read_tsv(
+  fiveprime_silix_path,
+  col_names = c(
+    "Five_Prime_Family_ID",
+    "Attributes"
+  ),
+  show_col_types = FALSE
+)
+
+fiveprime_family_assignments <- silix_raw %>%
+  dplyr::mutate(
+
+    lLTR_ID =
+      sub(
+        "^ID=([^;]+);.*$",
+        "\\1",
+        Attributes
+      ),
+
+    # Exact final conversion used in the original analysis:
+    # lLTR_51885 -> LTRRT_51885
+    TE_ID =
+      sub(
+        "^lLTR_",
+        "LTRRT_",
+        lLTR_ID
+      )
+  ) %>%
+  dplyr::select(
+    Five_Prime_Family_ID,
+    lLTR_ID,
+    TE_ID
+  ) %>%
+  dplyr::filter(
+    !is.na(Five_Prime_Family_ID),
+    !is.na(TE_ID)
+  ) %>%
+  dplyr::distinct(
+    TE_ID,
+    .keep_all = TRUE
+  )
+
+
+# ==============================================================================
+# 16. MATCH EXPRESSION TES TO 5′ LTR FAMILIES
+# ==============================================================================
+
+expression_te_map <- tibble::tibble(
+  TE_ID =
+    rownames(
+      scaled_expression_labeled
+    )
+)
+
+fiveprime_expression_membership <- expression_te_map %>%
+  dplyr::left_join(
+    fiveprime_family_assignments %>%
+      dplyr::select(
+        TE_ID,
+        Five_Prime_Family_ID
+      ),
+    by = "TE_ID"
+  )
+
+fiveprime_expression_matched <- fiveprime_expression_membership %>%
+  dplyr::filter(
+    !is.na(
+      Five_Prime_Family_ID
+    )
+  )
+
+cat(
+  "\n============================================================\n",
+  "5′ LTR FAMILY MATCH SUMMARY\n",
+  "============================================================\n",
+  "Expression TEs: ",
+  scales::comma(
+    nrow(
+      fiveprime_expression_membership
+    )
+  ),
+  "\nMatched to 5′ LTR family: ",
+  scales::comma(
+    nrow(
+      fiveprime_expression_matched
+    )
+  ),
+  "\n5′ LTR families represented: ",
+  scales::comma(
+    dplyr::n_distinct(
+      fiveprime_expression_matched$Five_Prime_Family_ID
+    )
+  ),
+  "\n",
+  sep = ""
+)
+
+
+# ==============================================================================
+# 17. COUNT EXPRESSED TES PER 5′ LTR FAMILY
+# ==============================================================================
+
+fiveprime_family_sizes_expression <- fiveprime_expression_matched %>%
+  dplyr::count(
+    Five_Prime_Family_ID,
+    name = "Number_Expressed_TEs"
+  ) %>%
+  dplyr::arrange(
+    dplyr::desc(
+      Number_Expressed_TEs
+    ),
+    Five_Prime_Family_ID
+  )
+
+fiveprime_family_order <-
+  fiveprime_family_sizes_expression$Five_Prime_Family_ID
+
+
+# ==============================================================================
+# 18. ORDER TES WITHIN EACH FAMILY BY EXPRESSION PROFILE
+# ==============================================================================
+
+ordered_te_ids <- character(0)
+family_end_positions <- integer(0)
+running_total <- 0
+
+for (fam in fiveprime_family_order) {
+
+  family_te_ids <- fiveprime_expression_matched %>%
+    dplyr::filter(
+      Five_Prime_Family_ID == fam
+    ) %>%
+    dplyr::pull(
+      TE_ID
+    )
+
+  family_matrix <- scaled_expression_labeled[
+    family_te_ids,
+    ,
+    drop = FALSE
+  ]
+
+  if (nrow(family_matrix) > 1) {
+
+    family_distance <- stats::dist(
+      family_matrix
+    )
+
+    family_hclust <- stats::hclust(
+      family_distance,
+      method = "average"
+    )
+
+    family_te_ids <-
+      rownames(
+        family_matrix
+      )[
+        family_hclust$order
+      ]
+  }
+
+  ordered_te_ids <- c(
+    ordered_te_ids,
+    family_te_ids
+  )
+
+  running_total <-
+    running_total +
+    length(
+      family_te_ids
+    )
+
+  family_end_positions <- c(
+    family_end_positions,
+    running_total
+  )
+}
+
+family_end_positions <- head(
+  family_end_positions,
+  -1
+)
+
+fiveprime_family_ordered_expression <-
+  scaled_expression_labeled[
+    ordered_te_ids,
+    ,
+    drop = FALSE
+  ]
+
+
+# ==============================================================================
+# 19. FAMILY-SIZE ROW ANNOTATION
+# ==============================================================================
+
+fiveprime_row_annotation <- fiveprime_expression_matched %>%
+  dplyr::left_join(
+    fiveprime_family_sizes_expression,
+    by = "Five_Prime_Family_ID"
+  ) %>%
+  dplyr::mutate(
+
+    Family_Size_Class =
+      dplyr::case_when(
+
+        Number_Expressed_TEs == 1 ~
+          "Singleton",
+
+        Number_Expressed_TEs >= 2 &
+          Number_Expressed_TEs <= 5 ~
+          "2–5 TEs",
+
+        Number_Expressed_TEs >= 6 &
+          Number_Expressed_TEs < 20 ~
+          "6–19 TEs",
+
+        Number_Expressed_TEs >= 20 ~
+          "≥20 TEs"
+      )
+  ) %>%
+  dplyr::select(
+    TE_ID,
+    Family_Size_Class
+  ) %>%
+  tibble::column_to_rownames(
+    "TE_ID"
+  )
+
+fiveprime_row_annotation <-
+  fiveprime_row_annotation[
+    ordered_te_ids,
+    ,
+    drop = FALSE
+  ]
+
+fiveprime_annotation_colors <- list(
+
+  Condition =
+    condition_colors,
+
+  Family_Size_Class = c(
+    "Singleton" = "#D9D9D9",
+    "2–5 TEs" = divergent_palette[3],
+    "6–19 TEs" = divergent_palette[5],
+    "≥20 TEs" = divergent_palette[7]
+  )
+)
+
+
+# ==============================================================================
+# 20. PANEL-A SUBSET — TOP 17 LARGEST 5′ LTR FAMILIES
+#
+# "Largest" is defined by the number of expressed TEs represented in the
+# expression dataset used for Figure 4.
+# ==============================================================================
+
+panel_a_family_ids <- fiveprime_family_sizes_expression %>%
+  dplyr::arrange(
+    dplyr::desc(Number_Expressed_TEs),
+    Five_Prime_Family_ID
+  ) %>%
+  dplyr::slice_head(
+    n = 17
+  ) %>%
+  dplyr::pull(
+    Five_Prime_Family_ID
+  )
+
+panel_a_te_ids <- fiveprime_expression_matched %>%
+  dplyr::filter(
+    Five_Prime_Family_ID %in% panel_a_family_ids
+  ) %>%
+  dplyr::pull(
+    TE_ID
+  )
+
+# Preserve the family ordering and within-family hierarchical TE ordering
+# established above.
+panel_a_ordered_te_ids <- ordered_te_ids[
+  ordered_te_ids %in% panel_a_te_ids
+]
+
+panel_a_expression <- scaled_expression_labeled[
+  panel_a_ordered_te_ids,
+  ,
+  drop = FALSE
+]
+
+panel_a_row_annotation <- fiveprime_row_annotation[
+  panel_a_ordered_te_ids,
+  ,
+  drop = FALSE
+]
+
+# Preserve the existing heatmap family order, but restrict it to the selected
+# top 17 families.
+panel_a_family_order <- fiveprime_family_order[
+  fiveprime_family_order %in% panel_a_family_ids
+]
+
+# Recalculate visible gaps so each of the 17 families remains visually distinct.
+panel_a_gap_positions <- integer(0)
+running_total <- 0
+
+for (fam in panel_a_family_order) {
+
+  family_n <- fiveprime_family_sizes_expression %>%
+    dplyr::filter(
+      Five_Prime_Family_ID == fam
+    ) %>%
+    dplyr::pull(
+      Number_Expressed_TEs
+    )
+
+  running_total <- running_total + family_n
+
+  if (
+    fam != tail(
+      panel_a_family_order,
+      1
+    )
+  ) {
+    panel_a_gap_positions <- c(
+      panel_a_gap_positions,
+      running_total
+    )
+  }
+}
+
+cat(
+  "\n============================================================\n",
+  "PANEL A FAMILY FILTER\n",
+  "============================================================\n",
+  "Top 17 largest 5′ LTR families by number of expressed TEs\n",
+  "Families retained: ",
+  length(panel_a_family_ids),
+  "\nTEs retained in Panel A: ",
+  scales::comma(nrow(panel_a_expression)),
+  "\n\nSelected families:\n",
+  sep = ""
+)
+
+print(
+  fiveprime_family_sizes_expression %>%
+    dplyr::filter(
+      Five_Prime_Family_ID %in% panel_a_family_ids
+    ) %>%
+    dplyr::arrange(
+      dplyr::desc(Number_Expressed_TEs),
+      Five_Prime_Family_ID
+    )
+)
+
+
+# ==============================================================================
+# 21. PANEL A — TOP 17 LARGEST 5′ LTR FAMILIES
+#
+# Panel A uses the EXACT SAME CONDITION/SAMPLE COLUMN CLUSTERING as Panel B.
+# We pass Panel B's column hclust object directly to pheatmap, so the column
+# dendrogram and sample order are identical between the two heatmaps.
+# ==============================================================================
+
+if (is.null(all_te_heatmap_result$tree_col)) {
+  stop("Panel B did not return a column clustering tree.")
+}
+
+family_heatmap_result <- pheatmap::pheatmap(
+  panel_a_expression,
+
+  cluster_rows = FALSE,
+
+  # Reuse Panel B's column tree rather than independently clustering Panel A.
+  cluster_cols = all_te_heatmap_result$tree_col,
+
+  show_rownames = FALSE,
+  show_colnames = TRUE,
+
+  annotation_col =
+    sample_annotation_labeled,
+
+  annotation_colors =
+    list(
+      Condition = condition_colors
+    ),
+
+  gaps_row =
+    panel_a_gap_positions,
+
+  color =
+    heatmap_colors,
+
+  breaks =
+    seq(
+      -3,
+      3,
+      length.out = 102
+    ),
+
+  border_color = NA,
+
+  fontsize_col = 9,
+
+  angle_col = 45,
+
+  main = "",
+
+  silent = TRUE
+)
+
+# Add extra blank space to the LEFT of Panel A so the first rotated sample
+# label ("Heat rep 1") is not clipped by the heatmap boundary.
+panel_a_gtable <- family_heatmap_result$gtable
+
+panel_a_gtable <- gtable::gtable_add_cols(
+  panel_a_gtable,
+  grid::unit(0.35, "in"),
+  pos = 0
+)
+
+panel_a <- patchwork::wrap_elements(
+  full = panel_a_gtable
+)
+
+
+# ==============================================================================
+# 22. BUILD DATA FOR RL000019 LINE GRAPH
+# ==============================================================================
+
+all_family_expression <- scaled_expression_labeled[
+  fiveprime_expression_matched$TE_ID,
+  ,
+  drop = FALSE
+] %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column(
+    "TE_ID"
+  ) %>%
+  tidyr::pivot_longer(
+    cols = -TE_ID,
+    names_to = "Sample",
+    values_to = "Scaled_Expression"
+  ) %>%
+  dplyr::left_join(
+    fiveprime_expression_matched %>%
+      dplyr::select(
+        TE_ID,
+        Five_Prime_Family_ID
+      ),
+    by = "TE_ID"
+  ) %>%
+  dplyr::mutate(
+
+    Condition =
+      dplyr::case_when(
+
+        grepl(
+          "^Control",
+          Sample,
+          ignore.case = TRUE
+        ) ~ "Control",
+
+        grepl(
+          "^Heat",
+          Sample,
+          ignore.case = TRUE
+        ) ~ "Heat",
+
+        grepl(
+          "^Cold",
+          Sample,
+          ignore.case = TRUE
+        ) ~ "Cold",
+
+        grepl(
+          "^Salt",
+          Sample,
+          ignore.case = TRUE
+        ) ~ "Salt",
+
+        grepl(
+          "^UV",
+          Sample,
+          ignore.case = TRUE
+        ) ~ "UV",
+
+        TRUE ~ NA_character_
+      )
+  )
+
+
+# ==============================================================================
+# 23. CLASSIFY HEAT-HIGH / COLD-HIGH TES
+#
+# Same threshold as the original Slide-4 analysis:
+#   Heat - Cold >=  0.5  -> Heat-high
+#   Heat - Cold <= -0.5  -> Cold-high
+# ==============================================================================
+
+all_te_heat_cold <- all_family_expression %>%
+  dplyr::filter(
+    Condition %in%
+      c(
+        "Heat",
+        "Cold"
+      )
+  ) %>%
+  dplyr::group_by(
+    Five_Prime_Family_ID,
+    TE_ID,
+    Condition
+  ) %>%
+  dplyr::summarise(
+    Mean_Expression =
+      mean(
+        Scaled_Expression,
+        na.rm = TRUE
+      ),
+    .groups = "drop"
+  ) %>%
+  tidyr::pivot_wider(
+    names_from = Condition,
+    values_from = Mean_Expression
+  ) %>%
+  dplyr::filter(
+    !is.na(Heat),
+    !is.na(Cold)
+  ) %>%
+  dplyr::mutate(
+
+    Heat_minus_Cold =
+      Heat - Cold,
+
+    Expression_Pattern =
+      dplyr::case_when(
+
+        Heat_minus_Cold >= 0.5 ~
+          "Heat-high",
+
+        Heat_minus_Cold <= -0.5 ~
+          "Cold-high",
+
+        TRUE ~
+          "No strong preference"
+      )
+  )
+
+
+# ==============================================================================
+# 24. PANEL B — RL000019 CONTROL / COLD / HEAT PROFILE
+#
+# This is the LINE GRAPH on Slide 4.
+# ==============================================================================
+
+family_to_plot <- "RL000019"
+
+family_pattern_table <- all_te_heat_cold %>%
+  dplyr::filter(
+    Five_Prime_Family_ID == family_to_plot
+  ) %>%
+  dplyr::select(
+    TE_ID,
+    Expression_Pattern,
+    Heat_minus_Cold
+  )
+
+family_condition_expression <- all_family_expression %>%
+  dplyr::filter(
+    Five_Prime_Family_ID == family_to_plot
+  ) %>%
+  dplyr::filter(
+    !is.na(Condition)
+  ) %>%
+  dplyr::group_by(
+    TE_ID,
+    Condition
+  ) %>%
+  dplyr::summarise(
+    Mean_Scaled_Expression =
+      mean(
+        Scaled_Expression,
+        na.rm = TRUE
+      ),
+    .groups = "drop"
+  )
+
+family_plot_data <- family_condition_expression %>%
+  dplyr::left_join(
+    family_pattern_table,
+    by = "TE_ID"
+  ) %>%
+  dplyr::filter(
+    Condition %in%
+      c(
+        "Control",
+        "Cold",
+        "Heat"
+      )
+  ) %>%
+  dplyr::mutate(
+
+    Condition =
+      factor(
+        Condition,
+        levels = c(
+          "Control",
+          "Cold",
+          "Heat"
+        )
+      ),
+
+    Expression_Pattern =
+      factor(
+        Expression_Pattern,
+        levels = c(
+          "No strong preference",
+          "Cold-high",
+          "Heat-high"
+        )
+      )
+  )
+
+neutral_data <- family_plot_data %>%
+  dplyr::filter(
+    Expression_Pattern ==
+      "No strong preference"
+  )
+
+responsive_data <- family_plot_data %>%
+  dplyr::filter(
+    Expression_Pattern %in%
+      c(
+        "Cold-high",
+        "Heat-high"
+      )
+  )
+
+profile_colors <- c(
+  "Heat-high" = "#D55E6A",
+  "Cold-high" = "#27408B",
+  "No strong preference" = "#BDBDBD"
+)
+
+panel_b <- ggplot2::ggplot() +
+
+  ggplot2::geom_hline(
+    yintercept = 0,
+    linetype = "dashed",
+    linewidth = 0.45,
+    color = "grey55"
+  ) +
+
+  ggplot2::geom_line(
+    data = neutral_data,
+    ggplot2::aes(
+      x = Condition,
+      y = Mean_Scaled_Expression,
+      group = TE_ID
+    ),
+    color =
+      profile_colors[
+        "No strong preference"
+      ],
+    linewidth = 0.45,
+    alpha = 0.30
+  ) +
+
+  ggplot2::geom_line(
+    data = responsive_data,
+    ggplot2::aes(
+      x = Condition,
+      y = Mean_Scaled_Expression,
+      group = TE_ID,
+      color = Expression_Pattern
+    ),
+    linewidth = 0.8,
+    alpha = 0.65
+  ) +
+
+  ggplot2::geom_point(
+    data = responsive_data,
+    ggplot2::aes(
+      x = Condition,
+      y = Mean_Scaled_Expression,
+      color = Expression_Pattern
+    ),
+    size = 1.8,
+    alpha = 0.75
+  ) +
+
+  ggplot2::scale_color_manual(
+    values = profile_colors,
+    breaks = c(
+      "Heat-high",
+      "Cold-high"
+    ),
+    labels = c(
+      "Heat-high",
+      "Cold-high"
+    )
+  ) +
+
+  ggplot2::labs(
+    x = "Condition",
+    y = "Mean scaled expression",
+    color = "Expression pattern",
+    title = paste0("5′ LTR family ", family_to_plot)
+  ) +
+
+  ggplot2::theme_classic(
+    base_size = 12
+  ) +
+
+  ggplot2::theme(
+
+    plot.title =
+      ggplot2::element_text(
+        face = "bold",
+        size = 12,
+        hjust = 0.5
+      ),
+
+    axis.title =
+      ggplot2::element_text(
+        face = "bold"
+      ),
+
+    axis.text.x =
+      ggplot2::element_text(
+        face = "bold",
+        size = 11
+      ),
+
+    axis.text.y =
+      ggplot2::element_text(
+        size = 10
+      ),
+
+    legend.position =
+      "top",
+
+    legend.title =
+      ggplot2::element_text(
+        face = "bold"
+      )
+  )
+
+
+# ==============================================================================
+# 25. RECREATE THE FINAL k = 17 EXPRESSION-CLUSTER SOLUTION
+#
+# This uses the same final settings as the original large analysis:
+#   set.seed(123)
+#   nstart = 100
+#   iter.max = 300
+# ==============================================================================
+
+set.seed(123)
+
+km17 <- stats::kmeans(
+  scaled_expression,
+  centers = 17,
+  nstart = 100,
+  iter.max = 300
+)
+
+te_expression_clusters <- tibble::tibble(
+  TE_ID = rownames(scaled_expression),
+
+  Expression_Cluster = factor(
+    km17$cluster,
+    levels = 1:17
+  )
+)
+
+
+# ==============================================================================
+# 26. PANEL C — DATA-DRIVEN EXAMPLE OF WITHIN-FAMILY EXPRESSION HETEROGENEITY
+#
+# Goal:
+#   Select a sequence-defined 5′ LTR family whose individual TEs have strongly
+#   different expression profiles across control, cold, heat, salt, and UV.
+#
+# Selection is DATA-DRIVEN rather than hard-coded:
+#   1. Require >=10 expressed TEs in the family.
+#   2. Calculate each TE's mean scaled expression in each condition.
+#   3. Keep families represented in all five conditions.
+#   4. For each family, calculate all pairwise Euclidean distances among the
+#      five-condition TE expression profiles.
+#   5. Choose the family with the largest median pairwise profile distance.
+#
+# Thus Panel C is explicitly an example of a 5′ LTR sequence family whose
+# members show highly heterogeneous stress-response profiles.
+# ==============================================================================
+
+condition_order_panel_c <- c(
+  "Control",
+  "Cold",
+  "Heat",
+  "Salt",
+  "UV"
+)
+
+# Mean scaled expression for each TE in each condition.
+all_family_condition_expression <- all_family_expression %>%
+  dplyr::filter(
+    !is.na(Condition)
+  ) %>%
+  dplyr::group_by(
+    Five_Prime_Family_ID,
+    TE_ID,
+    Condition
+  ) %>%
+  dplyr::summarise(
+    Mean_Scaled_Expression =
+      mean(
+        Scaled_Expression,
+        na.rm = TRUE
+      ),
+    .groups = "drop"
+  )
+
+# Family sizes in the expression dataset.
+candidate_family_sizes <- all_family_condition_expression %>%
+  dplyr::distinct(
+    Five_Prime_Family_ID,
+    TE_ID
+  ) %>%
+  dplyr::count(
+    Five_Prime_Family_ID,
+    name = "Number_Expressed_TEs"
+  ) %>%
+  dplyr::filter(
+    Number_Expressed_TEs >= 10
+  )
+
+# Build one five-condition expression vector per TE.
+candidate_profile_wide <- all_family_condition_expression %>%
+  dplyr::filter(
+    Five_Prime_Family_ID %in%
+      candidate_family_sizes$Five_Prime_Family_ID
+  ) %>%
+  dplyr::filter(
+    Condition %in% condition_order_panel_c
+  ) %>%
+  dplyr::mutate(
+    Condition =
+      factor(
+        Condition,
+        levels = condition_order_panel_c
+      )
+  ) %>%
+  tidyr::pivot_wider(
+    names_from = Condition,
+    values_from = Mean_Scaled_Expression
+  )
+
+# Score each candidate family by median pairwise distance among TE profiles.
+candidate_family_ids <- unique(
+  candidate_profile_wide$Five_Prime_Family_ID
+)
+
+family_heterogeneity_scores <- lapply(
+  candidate_family_ids,
+  function(fam) {
+
+    fam_df <- candidate_profile_wide %>%
+      dplyr::filter(
+        Five_Prime_Family_ID == fam
+      )
+
+    profile_matrix <- fam_df %>%
+      dplyr::select(
+        dplyr::all_of(
+          condition_order_panel_c
+        )
+      ) %>%
+      as.matrix()
+
+    # Require complete profiles for this example panel.
+    complete_rows <- stats::complete.cases(
+      profile_matrix
+    )
+
+    profile_matrix <- profile_matrix[
+      complete_rows,
+      ,
+      drop = FALSE
+    ]
+
+    if (nrow(profile_matrix) < 10) {
+      return(
+        tibble::tibble(
+          Five_Prime_Family_ID = fam,
+          Number_Complete_TEs = nrow(profile_matrix),
+          Median_Profile_Distance = NA_real_,
+          Maximum_Profile_Distance = NA_real_
+        )
+      )
+    }
+
+    pairwise_distances <- as.numeric(
+      stats::dist(
+        profile_matrix,
+        method = "euclidean"
+      )
+    )
+
+    tibble::tibble(
+      Five_Prime_Family_ID = fam,
+      Number_Complete_TEs = nrow(profile_matrix),
+      Median_Profile_Distance =
+        stats::median(
+          pairwise_distances,
+          na.rm = TRUE
+        ),
+      Maximum_Profile_Distance =
+        max(
+          pairwise_distances,
+          na.rm = TRUE
+        )
+    )
+  }
+) %>%
+  dplyr::bind_rows() %>%
+  dplyr::filter(
+    is.finite(Median_Profile_Distance)
+  ) %>%
+  dplyr::arrange(
+    dplyr::desc(Median_Profile_Distance),
+    dplyr::desc(Maximum_Profile_Distance),
+    dplyr::desc(Number_Complete_TEs),
+    Five_Prime_Family_ID
+  )
+
+if (nrow(family_heterogeneity_scores) == 0) {
+  stop(
+    "No 5′ LTR family with >=10 TEs had complete profiles across all five conditions."
+  )
+}
+
+heterogeneous_family_to_plot <-
+  family_heterogeneity_scores$Five_Prime_Family_ID[1]
+
+cat(
+  "\n============================================================\n",
+  "PANEL C — HETEROGENEOUS 5′ LTR FAMILY\n",
+  "============================================================\n",
+  "Selected family: ",
+  heterogeneous_family_to_plot,
+  "\nComplete TEs: ",
+  family_heterogeneity_scores$Number_Complete_TEs[1],
+  "\nMedian pairwise profile distance: ",
+  round(
+    family_heterogeneity_scores$Median_Profile_Distance[1],
+    3
+  ),
+  "\nMaximum pairwise profile distance: ",
+  round(
+    family_heterogeneity_scores$Maximum_Profile_Distance[1],
+    3
+  ),
+  "\n",
+  sep = ""
+)
+
+# Save the complete family ranking so the selected example is transparent.
+readr::write_tsv(
+  family_heterogeneity_scores,
+  file.path(
+    output_dir,
+    "5prime_family_all_stress_expression_heterogeneity_ranking.tsv"
+  )
+)
+
+# Prepare Panel C data.
+panel_c_data <- all_family_condition_expression %>%
+  dplyr::filter(
+    Five_Prime_Family_ID ==
+      heterogeneous_family_to_plot
+  ) %>%
+  dplyr::filter(
+    Condition %in%
+      condition_order_panel_c
+  ) %>%
+  dplyr::mutate(
+    Condition =
+      factor(
+        Condition,
+        levels =
+          condition_order_panel_c
+      )
+  ) %>%
+  dplyr::left_join(
+    te_expression_clusters,
+    by = "TE_ID"
+  )
+
+# Plot all individual TE profiles in a single neutral color.
+# The purpose of this panel is to show the range of expression behavior within
+# one sequence-defined 5′ LTR family, not the k=17 cluster assignments.
+
+panel_c <- ggplot2::ggplot(
+  panel_c_data,
+  ggplot2::aes(
+    x = Condition,
+    y = Mean_Scaled_Expression,
+    group = TE_ID
+  )
+) +
+
+  ggplot2::geom_hline(
+    yintercept = 0,
+    linetype = "dashed",
+    linewidth = 0.45,
+    color = "grey55"
+  ) +
+
+  ggplot2::geom_line(
+    color = "grey45",
+    linewidth = 0.7,
+    alpha = 0.65
+  ) +
+
+  ggplot2::geom_point(
+    color = "grey45",
+    size = 1.6,
+    alpha = 0.75
+  ) +
+
+  ggplot2::labs(
+    x = "Condition",
+    y = "Mean scaled expression",
+    title =
+      paste0(
+        "5′ LTR family ",
+        heterogeneous_family_to_plot
+      )
+  ) +
+
+  ggplot2::theme_classic(
+    base_size = 12
+  ) +
+
+  ggplot2::theme(
+    plot.title =
+      ggplot2::element_text(
+        face = "bold",
+        size = 12,
+        hjust = 0.5
+      ),
+
+    axis.title =
+      ggplot2::element_text(
+        face = "bold"
+      ),
+
+    axis.text.x =
+      ggplot2::element_text(
+        face = "bold",
+        size = 10
+      ),
+
+    axis.text.y =
+      ggplot2::element_text(
+        size = 10
+      ),
+
+    legend.position = "none"
+  )
+
+
+# 27. PANEL D — k = 17 STRUCTURAL TE EXPRESSION-CLUSTER HEATMAP
+#
+# This reproduces the expression-cluster heatmap from the original large
+# analysis, with one requested presentation change:
+#
+#   show_colnames = FALSE
+#
+# Therefore SRR/sample labels are not printed beneath the heatmap.
+# ==============================================================================
+
+shared_te_ids_d <- intersect(
+  rownames(scaled_expression_labeled),
+  te_expression_clusters$TE_ID
+)
+
+panel_d_matrix <- scaled_expression_labeled[
+  shared_te_ids_d,
+  ,
+  drop = FALSE
+]
+
+panel_d_cluster_vector <-
+  te_expression_clusters$Expression_Cluster[
+    match(
+      rownames(panel_d_matrix),
+      te_expression_clusters$TE_ID
+    )
+  ]
+
+# Order rows by expression cluster, exactly as in the original heatmap.
+panel_d_row_order <- order(
+  as.integer(
+    panel_d_cluster_vector
+  )
+)
+
+panel_d_matrix <- panel_d_matrix[
+  panel_d_row_order,
+  ,
+  drop = FALSE
+]
+
+panel_d_cluster_vector <-
+  panel_d_cluster_vector[
+    panel_d_row_order
+  ]
+
+panel_d_row_annotation <- data.frame(
+  Expression_Cluster =
+    panel_d_cluster_vector
+)
+
+rownames(
+  panel_d_row_annotation
+) <- rownames(
+  panel_d_matrix
+)
+
+panel_d_sample_annotation <-
+  sample_annotation_labeled[
+    colnames(panel_d_matrix),
+    ,
+    drop = FALSE
+  ]
+
+# Use the exact condition-color definitions from the original k=17 heatmap.
+panel_d_condition_colors <- c(
+  "control" = "grey60",
+  "heat" = divergent_palette[8],
+  "cold" = divergent_palette[4],
+  "salt" = divergent_palette[5],
+  "UV" = divergent_palette[7]
+)
+
+panel_d_cluster_colors <- grDevices::hcl.colors(
+  17,
+  palette = "Dynamic"
+)
+
+names(
+  panel_d_cluster_colors
+) <- as.character(
+  1:17
+)
+
+panel_d_annotation_colors <- list(
+  Condition =
+    panel_d_condition_colors,
+
+  Expression_Cluster =
+    panel_d_cluster_colors
+)
+
+panel_d_cluster_sizes <- table(
+  panel_d_cluster_vector
+)
+
+panel_d_gaps_row <- cumsum(
+  panel_d_cluster_sizes
+)
+
+panel_d_gaps_row <-
+  panel_d_gaps_row[
+    -length(
+      panel_d_gaps_row
+    )
+  ]
+
+expression_cluster_heatmap_result <- pheatmap::pheatmap(
+  panel_d_matrix,
+
+  cluster_rows = FALSE,
+
+  cluster_cols = TRUE,
+
+  annotation_row =
+    panel_d_row_annotation,
+
+  annotation_col =
+    panel_d_sample_annotation,
+
+  annotation_colors =
+    panel_d_annotation_colors,
+
+  gaps_row =
+    panel_d_gaps_row,
+
+  color =
+    heatmap_colors,
+
+  breaks =
+    seq(
+      -3,
+      3,
+      length.out = 102
+    ),
+
+  show_rownames = FALSE,
+
+  # Show condition/replicate labels beneath Panel D, matching Panel A.
+  show_colnames = TRUE,
+
+  border_color = NA,
+
+  fontsize_col = 9,
+
+  angle_col = 45,
+
+  annotation_names_row = FALSE,
+
+  annotation_names_col = FALSE,
+
+  main = "",
+
+  silent = TRUE
+)
+
+panel_d <- patchwork::wrap_elements(
+  full =
+    expression_cluster_heatmap_result$gtable
+)
+
+
+# ==============================================================================
+# 28. DISPLAY / SAVE INDIVIDUAL PANELS
+# ==============================================================================
+
+print(
+  family_heatmap_result
+)
+
+print(
+  panel_b
+)
+
+print(
+  panel_c
+)
+
+print(
+  expression_cluster_heatmap_result
+)
+
+
+# Preserve the original RL000019 panel as a standalone output.
+ggplot2::ggsave(
+  filename = file.path(
+    output_dir,
+    "RL000019_Control_Cold_Heat_expression_profiles.jpeg"
+  ),
+  plot = panel_b,
+  width = 7,
+  height = 5,
+  units = "in",
+  dpi = 600,
+  bg = "white"
+)
+
+ggplot2::ggsave(
+  filename = file.path(
+    output_dir,
+    "RL000019_Control_Cold_Heat_expression_profiles.pdf"
+  ),
+  plot = panel_b,
+  width = 7,
+  height = 5,
+  units = "in",
+  bg = "white"
+)
+
+
+# Save the newly selected heterogeneous-family example.
+ggplot2::ggsave(
+  filename = file.path(
+    output_dir,
+    paste0(
+      heterogeneous_family_to_plot,
+      "_all_stress_expression_profiles.jpeg"
+    )
+  ),
+  plot = panel_c,
+  width = 7,
+  height = 5,
+  units = "in",
+  dpi = 600,
+  bg = "white"
+)
+
+ggplot2::ggsave(
+  filename = file.path(
+    output_dir,
+    paste0(
+      heterogeneous_family_to_plot,
+      "_all_stress_expression_profiles.pdf"
+    )
+  ),
+  plot = panel_c,
+  width = 7,
+  height = 5,
+  units = "in",
+  bg = "white"
+)
+
+
+# ==============================================================================
+# 29. COMBINE THE FOUR FIGURE-4 PANELS
+#
+# Layout:
+#
+#   A = top 17 largest 5′ LTR family heatmap
+#   B = original RL000019 Control/Cold/Heat line graph
+#   C = data-driven heterogeneous 5′ LTR family line graph across all stresses
+#   D = k=17 expression-cluster heatmap with sample labels hidden
+#
+# A and D are given more vertical space because they are heatmaps.
+# ==============================================================================
+
+figure4_final <- (
+  panel_a |
+  panel_b
+) /
+(
+  panel_c |
+  panel_d
+) +
+
+  patchwork::plot_layout(
+    heights = c(
+      1,
+      1
+    ),
+    widths = c(
+      1.28,
+      1
+    )
+  ) +
+
+  patchwork::plot_annotation(
+    tag_levels = "A"
+  ) &
+
+  ggplot2::theme(
+    # Retain the enlarged tag styling previously used to match Figures 1–3.
+    plot.tag =
+      ggplot2::element_text(
+        face = "bold",
+        size = 23
+      ),
+
+    plot.tag.position =
+      c(
+        0.01,
+        0.99
+      )
+  )
+
+print(
+  figure4_final
+)
+
+
+ggplot2::ggsave(
+  filename = file.path(
+    output_dir,
+    "Figure4_FINAL.jpeg"
+  ),
+  plot = figure4_final,
+  width = 15,
+  height = 15,
+  units = "in",
+  dpi = 600,
+  bg = "white"
+)
+
+
+ggplot2::ggsave(
+  filename = file.path(
+    output_dir,
+    "Figure4_FINAL.pdf"
+  ),
+  plot = figure4_final,
+  width = 15,
+  height = 15,
+  units = "in",
+  bg = "white"
+)
+
+
+# ==============================================================================
+# 30. FINAL CHECKS
+# ==============================================================================
+
+cat(
+  "\n============================================================\n",
+  "FIGURE 4 COMPLETE\n",
+  "============================================================\n",
+
+  "Panel A: top 17 largest 5′ LTR family heatmap\n",
+  "Panel B: original RL000019 Control/Cold/Heat profiles\n",
+  "Panel C: heterogeneous 5′ LTR family across Control/Cold/Heat/Salt/UV; neutral TE profiles\n",
+  "Panel D: k=17 expression-cluster heatmap; condition/replicate labels shown\n\n",
+
+  "Variable expressed TEs: ",
+  scales::comma(
+    nrow(
+      scaled_expression
+    )
+  ),
+
+  "\nMatched to 5′ LTR families: ",
+  scales::comma(
+    nrow(
+      fiveprime_expression_matched
+    )
+  ),
+
+  "\nRL000019 TEs plotted in Panel B: ",
+  scales::comma(
+    dplyr::n_distinct(
+      family_plot_data$TE_ID
+    )
+  ),
+
+  "\nPanel C selected family: ",
+  heterogeneous_family_to_plot,
+
+  "\nPanel C TEs plotted: ",
+  scales::comma(
+    dplyr::n_distinct(
+      panel_c_data$TE_ID
+    )
+  ),
+
+  "\n\nOutputs:\n",
+  file.path(
+    output_dir,
+    "Figure4_FINAL.jpeg"
+  ),
+  "\n",
+  file.path(
+    output_dir,
+    "Figure4_FINAL.pdf"
+  ),
+  "\n",
+
+  sep = ""
+)
+
+
+
+
+
+```
+
+

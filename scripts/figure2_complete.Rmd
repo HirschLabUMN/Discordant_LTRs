@@ -1,0 +1,2238 @@
+---
+title: "figure2_complete"
+output: html_document
+date: "2026-09-21"
+---
+
+```{r}
+# ==============================================================================
+# FIGURE 2 — COMPLETE STANDALONE SCRIPT — SYNCED WITH CORRECTED FIGURE 1
+#
+# Panel A: Jaccard similarity among discordant family relationships
+# Panel B: LTR identity of concordant vs discordant individual TEs
+# Panel C: Superfamily enrichment/depletion among discordant individual TEs
+#
+# This script rebuilds all three panels directly from the four SiLiX files.
+# It does NOT depend on objects from the R Markdown environment.
+# ==============================================================================
+
+
+# ==============================================================================
+# 0. PACKAGES
+# ==============================================================================
+
+suppressPackageStartupMessages({
+  library(data.table)
+  library(dplyr)
+  library(tidyr)
+  library(ggplot2)
+  library(scales)
+  library(patchwork)
+  library(igraph)
+})
+
+
+# ==============================================================================
+# 1. INPUT FILES
+# ==============================================================================
+
+b73_full_path <- paste0(
+  "/projects/standard/hirschc1/menar060/family_analysis/",
+  "redo_full_sequence/B73/output/B73_full_sequence_silix.out"
+)
+
+b73_5prime_path <- paste0(
+  "/projects/standard/hirschc1/menar060/family_analysis/",
+  "redo_five_prime/B73/output/B73_five_prime_silix.out"
+)
+
+setaria_full_path <- paste0(
+  "/projects/standard/hirschc1/menar060/family_analysis/",
+  "redo_full_sequence/Setaria/output/",
+  "Milhouse_plus_full_sequence_silix.out"
+)
+
+setaria_5prime_path <- paste0(
+  "/projects/standard/hirschc1/menar060/family_analysis/",
+  "redo_five_prime/Setaria/output/",
+  "Milhouse_plus_five_prime_silix.out"
+)
+
+
+# ==============================================================================
+# 2. OUTPUT DIRECTORY
+# ==============================================================================
+
+output_dir <- "final_panel_figures"
+
+dir.create(
+  output_dir,
+  showWarnings = FALSE,
+  recursive = TRUE
+)
+
+
+# ==============================================================================
+# 3. COLORS
+# ==============================================================================
+
+divergent_palette <- c(
+  "#27408B",  # 1 dark blue
+  "#1B9E77",  # 2 green
+  "#2AA198",  # 3 teal
+  "#56B4E9",  # 4 sky blue
+  "#E6AB02",  # 5 gold
+  "#D55E6A",  # 6 coral
+  "#984EA3",  # 7 purple
+  "#7F1D3A"   # 8 burgundy
+)
+
+species_colors <- c(
+  "B73" = divergent_palette[2],
+  "Setaria" = divergent_palette[6]
+)
+
+status_colors <- c(
+  "Clustering concordance" = divergent_palette[1],
+  "Clustering discordance" = divergent_palette[8]
+)
+
+# These are the colors used for the final superfamily enrichment plot.
+superfamily_colors <- c(
+  "Ty1/Copia" = "#009E73",
+  "Ty3" = "#CC79A7",
+  "Other" = "#8C6D31"
+)
+
+
+# ==============================================================================
+# 4. PLOT THEME
+# ==============================================================================
+
+publication_theme <- theme_classic(base_size = 10) +
+  theme(
+    axis.title = element_text(
+      face = "bold"
+    ),
+    strip.text = element_text(
+      face = "bold"
+    ),
+    legend.title = element_text(
+      face = "bold"
+    )
+  )
+
+
+# ==============================================================================
+# 5. ATTRIBUTE EXTRACTION
+# ==============================================================================
+
+extract_silix_attribute <- function(
+  attribute_string,
+  attribute_name
+) {
+
+  pattern <- paste0(
+    "(?:^|;)",
+    attribute_name,
+    "=([^;]+)"
+  )
+
+  extracted_value <- sub(
+    paste0(
+      ".*",
+      pattern,
+      ".*"
+    ),
+    "\\1",
+    as.character(
+      attribute_string
+    ),
+    perl = TRUE
+  )
+
+  no_match <- !grepl(
+    pattern,
+    as.character(
+      attribute_string
+    ),
+    perl = TRUE
+  )
+
+  extracted_value[no_match] <- NA_character_
+
+  extracted_value
+}
+
+
+# ==============================================================================
+# 6. READ B73 FULL-SEQUENCE ASSIGNMENTS
+#
+# This reproduces the final TE-ID-based B73 analysis:
+#
+# Full sequence:
+#   LTRRT_51885
+#
+# 5′ LTR:
+#   lLTR_51885
+#
+# 5′ IDs are normalized to:
+#   LTRRT_51885
+# ==============================================================================
+
+b73_full_with_id <- data.table::fread(
+  b73_full_path,
+  header = FALSE,
+  sep = "\t",
+  select = 1:2,
+  col.names = c(
+    "Full_Family_ID",
+    "Full_Element_Attributes"
+  )
+) %>%
+  dplyr::mutate(
+
+    TE_ID = extract_silix_attribute(
+      Full_Element_Attributes,
+      "ID"
+    ),
+
+    TE_Name = extract_silix_attribute(
+      Full_Element_Attributes,
+      "Name"
+    ),
+
+    LTR_Identity = suppressWarnings(
+      as.numeric(
+        extract_silix_attribute(
+          Full_Element_Attributes,
+          "ltr_identity"
+        )
+      )
+    ),
+
+    Classification = extract_silix_attribute(
+      Full_Element_Attributes,
+      "Classification"
+    ),
+
+    Full_Seq_Family = paste0(
+      "B73_Full_",
+      Full_Family_ID
+    )
+  ) %>%
+  dplyr::filter(
+    !is.na(TE_ID),
+    grepl(
+      "^LTRRT_",
+      TE_ID
+    )
+  ) %>%
+  dplyr::select(
+    TE_ID,
+    TE_Name,
+    LTR_Identity,
+    Classification,
+    Full_Seq_Family
+  ) %>%
+  dplyr::distinct(
+    TE_ID,
+    .keep_all = TRUE
+  )
+
+
+# ==============================================================================
+# 7. READ B73 5′ LTR ASSIGNMENTS
+# ==============================================================================
+
+b73_five_with_id <- data.table::fread(
+  b73_5prime_path,
+  header = FALSE,
+  sep = "\t",
+  select = 1:2,
+  col.names = c(
+    "Five_Family_ID",
+    "Five_Element_Attributes"
+  )
+) %>%
+  dplyr::mutate(
+
+    Five_Prime_LTR_ID = extract_silix_attribute(
+      Five_Element_Attributes,
+      "ID"
+    ),
+
+    TE_ID = sub(
+      "^lLTR_",
+      "LTRRT_",
+      Five_Prime_LTR_ID
+    ),
+
+    Five_Prime_Family = paste0(
+      "B73_5prime_",
+      Five_Family_ID
+    )
+  ) %>%
+  dplyr::filter(
+    !is.na(Five_Prime_LTR_ID),
+    grepl(
+      "^lLTR_",
+      Five_Prime_LTR_ID
+    ),
+    !is.na(TE_ID)
+  ) %>%
+  dplyr::select(
+    TE_ID,
+    Five_Prime_LTR_ID,
+    Five_Prime_Family
+  ) %>%
+  dplyr::distinct(
+    TE_ID,
+    .keep_all = TRUE
+  )
+
+
+# ==============================================================================
+# 8. BUILD FINAL B73 ASSIGNMENT TABLE
+# ==============================================================================
+
+b73_assignments <- b73_full_with_id %>%
+  dplyr::inner_join(
+    b73_five_with_id,
+    by = "TE_ID"
+  ) %>%
+  dplyr::select(
+    TE_ID,
+    TE_Name,
+    LTR_Identity,
+    Classification,
+    Full_Seq_Family,
+    Five_Prime_Family
+  ) %>%
+  dplyr::distinct(
+    TE_ID,
+    .keep_all = TRUE
+  )
+
+
+# ==============================================================================
+# 9. READ SETARIA FULL-SEQUENCE ASSIGNMENTS
+# ==============================================================================
+
+setaria_full_with_id <- data.table::fread(
+  setaria_full_path,
+  header = FALSE,
+  sep = "\t",
+  select = 1:2,
+  col.names = c(
+    "Full_Family_ID",
+    "Full_Element_Attributes"
+  )
+) %>%
+  dplyr::mutate(
+
+    TE_ID = extract_silix_attribute(
+      Full_Element_Attributes,
+      "ID"
+    ),
+
+    TE_Name = extract_silix_attribute(
+      Full_Element_Attributes,
+      "Name"
+    ),
+
+    LTR_Identity = suppressWarnings(
+      as.numeric(
+        extract_silix_attribute(
+          Full_Element_Attributes,
+          "ltr_identity"
+        )
+      )
+    ),
+
+    Classification = extract_silix_attribute(
+      Full_Element_Attributes,
+      "Classification"
+    ),
+
+    Full_Seq_Family = paste0(
+      "Setaria_Full_",
+      Full_Family_ID
+    )
+  ) %>%
+  dplyr::filter(
+    !is.na(TE_ID)
+  ) %>%
+  dplyr::select(
+    TE_ID,
+    TE_Name,
+    LTR_Identity,
+    Classification,
+    Full_Seq_Family
+  ) %>%
+  dplyr::distinct(
+    TE_ID,
+    .keep_all = TRUE
+  )
+
+
+# ==============================================================================
+# 10. READ SETARIA 5′ LTR ASSIGNMENTS
+#
+# Setaria uses more than one full-sequence ID convention.
+#
+# Examples:
+#
+# lLTR_RLCSvm1G00294 -> RLCSvm1G00294
+# lLTR_RLGSvm1G00234 -> RLGSvm1G00234
+# lLTR_RLXSvm1G00072 -> LTRRT_RLXSvm1G00072
+#
+# Candidate 1 = remove lLTR_
+# Candidate 2 = remove lLTR_ and prepend LTRRT_
+#
+# The candidate that actually exists in the full-sequence file is retained.
+# ==============================================================================
+
+setaria_five_raw <- data.table::fread(
+  setaria_5prime_path,
+  header = FALSE,
+  sep = "\t",
+  select = 1:2,
+  col.names = c(
+    "Five_Family_ID",
+    "Five_Element_Attributes"
+  )
+) %>%
+  dplyr::mutate(
+
+    Five_Prime_LTR_ID = extract_silix_attribute(
+      Five_Element_Attributes,
+      "ID"
+    ),
+
+    Five_Prime_Family = paste0(
+      "Setaria_5prime_",
+      Five_Family_ID
+    )
+  )
+
+
+full_setaria_ids <- unique(
+  setaria_full_with_id$TE_ID
+)
+
+
+setaria_five_with_id <- setaria_five_raw %>%
+  dplyr::filter(
+    !is.na(Five_Prime_LTR_ID)
+  ) %>%
+  dplyr::mutate(
+
+    Candidate_TE_ID_1 = sub(
+      "^lLTR_",
+      "",
+      Five_Prime_LTR_ID
+    ),
+
+    Candidate_TE_ID_2 = paste0(
+      "LTRRT_",
+      Candidate_TE_ID_1
+    ),
+
+    Candidate_1_Matches =
+      Candidate_TE_ID_1 %in%
+      full_setaria_ids,
+
+    Candidate_2_Matches =
+      Candidate_TE_ID_2 %in%
+      full_setaria_ids,
+
+    TE_ID = dplyr::case_when(
+
+      Candidate_1_Matches &
+        !Candidate_2_Matches ~
+        Candidate_TE_ID_1,
+
+      Candidate_2_Matches &
+        !Candidate_1_Matches ~
+        Candidate_TE_ID_2,
+
+      Candidate_1_Matches &
+        Candidate_2_Matches ~
+        Candidate_TE_ID_1,
+
+      TRUE ~
+        NA_character_
+    )
+  )
+
+
+setaria_id_recovery_summary <- setaria_five_with_id %>%
+  dplyr::summarise(
+
+    Total_5prime_Records =
+      dplyr::n(),
+
+    Direct_Matches =
+      sum(
+        Candidate_1_Matches &
+          !Candidate_2_Matches,
+        na.rm = TRUE
+      ),
+
+    LTRRT_Prefix_Matches =
+      sum(
+        Candidate_2_Matches &
+          !Candidate_1_Matches,
+        na.rm = TRUE
+      ),
+
+    Both_Candidates_Match =
+      sum(
+        Candidate_1_Matches &
+          Candidate_2_Matches,
+        na.rm = TRUE
+      ),
+
+    No_Match =
+      sum(
+        is.na(TE_ID)
+      )
+  )
+
+
+setaria_five_with_id <- setaria_five_with_id %>%
+  dplyr::filter(
+    !is.na(TE_ID)
+  ) %>%
+  dplyr::select(
+    TE_ID,
+    Five_Prime_LTR_ID,
+    Five_Prime_Family
+  ) %>%
+  dplyr::distinct(
+    TE_ID,
+    .keep_all = TRUE
+  )
+
+
+# ==============================================================================
+# 11. BUILD FINAL SETARIA ASSIGNMENT TABLE
+# ==============================================================================
+
+setaria_assignments <- setaria_full_with_id %>%
+  dplyr::inner_join(
+    setaria_five_with_id,
+    by = "TE_ID"
+  ) %>%
+  dplyr::select(
+    TE_ID,
+    TE_Name,
+    LTR_Identity,
+    Classification,
+    Full_Seq_Family,
+    Five_Prime_Family
+  ) %>%
+  dplyr::distinct(
+    TE_ID,
+    .keep_all = TRUE
+  )
+
+
+# ==============================================================================
+# 12. CLASSIFY INDIVIDUAL TEs
+#
+# Final individual-TE definition — SAME AS FIGURE 1 PANEL C:
+#
+# A TE is concordant when its full-sequence / 5′ LTR family pair is the
+# UNIQUE largest overlap for BOTH the full-sequence family and 5′ LTR family.
+#
+# All other TEs are discordant.
+# ==============================================================================
+
+classify_individual_te_status <- function(
+  assignment_df,
+  species_name
+) {
+
+  clean_assignments <- assignment_df %>%
+    dplyr::filter(
+      !is.na(TE_ID),
+      !is.na(Full_Seq_Family),
+      !is.na(Five_Prime_Family)
+    ) %>%
+    dplyr::distinct(
+      TE_ID,
+      .keep_all = TRUE
+    )
+
+  pair_counts <- clean_assignments %>%
+    dplyr::count(
+      Full_Seq_Family,
+      Five_Prime_Family,
+      name = "Pair_Size"
+    )
+
+  pair_classification <- pair_counts %>%
+    dplyr::group_by(
+      Full_Seq_Family
+    ) %>%
+    dplyr::mutate(
+
+      Largest_Pair_in_Full =
+        max(Pair_Size),
+
+      Number_Tied_for_Full_Max =
+        sum(
+          Pair_Size ==
+            Largest_Pair_in_Full
+        ),
+
+      Unique_Full_Maximum =
+        Pair_Size ==
+          Largest_Pair_in_Full &
+        Number_Tied_for_Full_Max ==
+          1
+    ) %>%
+    dplyr::ungroup() %>%
+    dplyr::group_by(
+      Five_Prime_Family
+    ) %>%
+    dplyr::mutate(
+
+      Largest_Pair_in_Five =
+        max(Pair_Size),
+
+      Number_Tied_for_Five_Max =
+        sum(
+          Pair_Size ==
+            Largest_Pair_in_Five
+        ),
+
+      Unique_Five_Maximum =
+        Pair_Size ==
+          Largest_Pair_in_Five &
+        Number_Tied_for_Five_Max ==
+          1
+    ) %>%
+    dplyr::ungroup() %>%
+    dplyr::mutate(
+
+      Mutual_Unique_Largest =
+        Unique_Full_Maximum &
+        Unique_Five_Maximum,
+
+      Clustering_Status =
+        dplyr::if_else(
+          Mutual_Unique_Largest,
+          "Clustering concordance",
+          "Clustering discordance"
+        )
+    )
+
+  clean_assignments %>%
+    dplyr::left_join(
+      pair_classification,
+      by = c(
+        "Full_Seq_Family",
+        "Five_Prime_Family"
+      )
+    ) %>%
+    dplyr::mutate(
+
+      Species = species_name,
+
+      Clustering_Status = factor(
+        Clustering_Status,
+        levels = c(
+          "Clustering concordance",
+          "Clustering discordance"
+        )
+      )
+    )
+}
+
+
+b73_te_status <- classify_individual_te_status(
+  b73_assignments,
+  "B73"
+)
+
+
+setaria_te_status <- classify_individual_te_status(
+  setaria_assignments,
+  "Setaria"
+)
+
+
+combined_te_status <- dplyr::bind_rows(
+  b73_te_status,
+  setaria_te_status
+) %>%
+  dplyr::mutate(
+    Species = factor(
+      Species,
+      levels = c(
+        "B73",
+        "Setaria"
+      )
+    )
+  )
+
+# ==============================================================================
+# CROSS-FIGURE VALIDATION
+#
+# Figure 2 Panels B/C must use exactly the same structural-TE population and
+# TE-level concordance definition as corrected Figure 1 Panel C.
+#
+# Corrected Figure 1:
+#   Maize   51,826 = 43,042 concordant + 8,784 discordant
+#   Setaria    603 =    490 concordant +   113 discordant
+# ==============================================================================
+
+figure2_status_check <- combined_te_status %>%
+  dplyr::mutate(
+    Species = as.character(Species),
+    Clustering_Status = as.character(Clustering_Status)
+  ) %>%
+  dplyr::distinct(
+    Species,
+    TE_ID,
+    .keep_all = TRUE
+  ) %>%
+  dplyr::count(
+    Species,
+    Clustering_Status,
+    name = "Observed_n"
+  )
+
+expected_status_counts <- tibble::tribble(
+  ~Species,  ~Clustering_Status,          ~Expected_n,
+  "B73",     "Clustering concordance",        43042L,
+  "B73",     "Clustering discordance",         8784L,
+  "Setaria", "Clustering concordance",           490L,
+  "Setaria", "Clustering discordance",           113L
+)
+
+figure2_status_check <- expected_status_counts %>%
+  dplyr::left_join(
+    figure2_status_check,
+    by = c("Species", "Clustering_Status")
+  ) %>%
+  dplyr::mutate(
+    Matches_Figure1 = Expected_n == Observed_n
+  )
+
+cat("\n================ FIGURE 2 / FIGURE 1 STATUS CHECK ================\n")
+print(figure2_status_check, n = Inf)
+
+if (
+  any(is.na(figure2_status_check$Matches_Figure1)) ||
+  any(!figure2_status_check$Matches_Figure1)
+) {
+  stop(
+    "Figure 2 TE status does not match corrected Figure 1 Panel C. ",
+    "Do not use Figure 2 until the discrepancy is resolved."
+  )
+}
+
+cat(
+  "\nValidated structural-TE populations:\n",
+  "  Maize:   51,826 TEs\n",
+  "  Setaria:    603 TEs\n",
+  "Figure 2 Panels B/C are synchronized with Figure 1 Panel C.\n",
+  sep = ""
+)
+
+
+
+# ==============================================================================
+# 13. PANEL A — REBUILD THE DATA EXACTLY AS IN THE ORIGINAL JACCARD ANALYSIS
+#
+# IMPORTANT:
+# Panel A in the original analysis did NOT use the TE_ID tables used later for
+# the age and superfamily analyses.
+#
+# It used read_silix_assignments(), which:
+#   1. extracts Name= from each SiLiX record,
+#   2. de-duplicates by TE_Name within each clustering method,
+#   3. joins full-sequence and 5′ LTR assignments by TE_Name.
+#
+# This distinction is why the previous standalone versions produced the wrong
+# Maize distribution and the wrong sample size.
+# ==============================================================================
+
+
+parse_te_name <- function(element_id_vector) {
+
+  sub(
+    ".*Name=([^;]+).*",
+    "\\1",
+    element_id_vector
+  )
+}
+
+
+read_silix_assignments_for_jaccard <- function(
+  full_path,
+  five_prime_path,
+  species_name
+) {
+
+  full_dt <- data.table::fread(
+    full_path,
+    header = FALSE,
+    sep = "\t",
+    select = 1:2,
+    col.names = c(
+      "Family_ID",
+      "Element_ID"
+    )
+  )
+
+  five_prime_dt <- data.table::fread(
+    five_prime_path,
+    header = FALSE,
+    sep = "\t",
+    select = 1:2,
+    col.names = c(
+      "Family_ID",
+      "Element_ID"
+    )
+  )
+
+
+  full_families <- full_dt %>%
+    dplyr::mutate(
+      TE_Name =
+        parse_te_name(
+          Element_ID
+        ),
+
+      Full_Seq_Family =
+        paste0(
+          species_name,
+          "_Full_",
+          Family_ID
+        )
+    ) %>%
+    dplyr::distinct(
+      TE_Name,
+      .keep_all = TRUE
+    ) %>%
+    dplyr::select(
+      TE_Name,
+      Full_Seq_Family
+    )
+
+
+  five_prime_families <- five_prime_dt %>%
+    dplyr::mutate(
+      TE_Name =
+        parse_te_name(
+          Element_ID
+        ),
+
+      Five_Prime_Family =
+        paste0(
+          species_name,
+          "_5prime_",
+          Family_ID
+        )
+    ) %>%
+    dplyr::distinct(
+      TE_Name,
+      .keep_all = TRUE
+    ) %>%
+    dplyr::select(
+      TE_Name,
+      Five_Prime_Family
+    )
+
+
+  merged_df <- dplyr::inner_join(
+    full_families,
+    five_prime_families,
+    by = "TE_Name"
+  ) %>%
+    dplyr::mutate(
+      Species =
+        species_name
+    )
+
+
+  if(
+    nrow(
+      merged_df
+    ) == 0
+  ) {
+
+    stop(
+      "No shared TE names were found for ",
+      species_name,
+      "."
+    )
+  }
+
+
+  merged_df
+}
+
+
+b73_jaccard_elements <-
+  read_silix_assignments_for_jaccard(
+    full_path =
+      b73_full_path,
+
+    five_prime_path =
+      b73_5prime_path,
+
+    species_name =
+      "B73"
+  )
+
+
+setaria_jaccard_elements <-
+  read_silix_assignments_for_jaccard(
+    full_path =
+      setaria_full_path,
+
+    five_prime_path =
+      setaria_5prime_path,
+
+    species_name =
+      "Setaria"
+  )
+
+
+combined_jaccard_elements <-
+  dplyr::bind_rows(
+    b73_jaccard_elements,
+    setaria_jaccard_elements
+  )
+
+
+# ==============================================================================
+# 14. CALCULATE JACCARD FOR EVERY OVERLAPPING FAMILY PAIR
+#
+# This is the original family-membership Jaccard calculation:
+#
+#                        shared TEs
+# Jaccard = -----------------------------------------
+#           full family + 5′ family - shared TEs
+# ==============================================================================
+
+
+calculate_family_jaccard_original <- function(
+  assignment_df
+) {
+
+  pair_counts <- assignment_df %>%
+    dplyr::count(
+      Species,
+      Full_Seq_Family,
+      Five_Prime_Family,
+      name =
+        "Shared_TEs"
+    )
+
+
+  full_sizes <- assignment_df %>%
+    dplyr::count(
+      Species,
+      Full_Seq_Family,
+      name =
+        "Full_Family_Size"
+    )
+
+
+  five_sizes <- assignment_df %>%
+    dplyr::count(
+      Species,
+      Five_Prime_Family,
+      name =
+        "Five_Prime_Family_Size"
+    )
+
+
+  pair_counts %>%
+    dplyr::left_join(
+      full_sizes,
+      by = c(
+        "Species",
+        "Full_Seq_Family"
+      )
+    ) %>%
+    dplyr::left_join(
+      five_sizes,
+      by = c(
+        "Species",
+        "Five_Prime_Family"
+      )
+    ) %>%
+    dplyr::mutate(
+
+      Union_TEs =
+        Full_Family_Size +
+        Five_Prime_Family_Size -
+        Shared_TEs,
+
+      Jaccard_Similarity =
+        Shared_TEs /
+        Union_TEs
+    )
+}
+
+
+jaccard_df_all <-
+  calculate_family_jaccard_original(
+    combined_jaccard_elements
+  )
+
+
+# ==============================================================================
+# 15. IDENTIFY DISCORDANT FAMILY RELATIONSHIPS
+#
+# This reproduces the ORIGINAL connected-component code used for the plot on
+# Slide 2.
+#
+# Each family is a node in a bipartite graph:
+#   full-sequence family <-> 5′ LTR family
+#
+# A connected component containing exactly one family from each method is
+# concordant.
+#
+# Any component containing more than one family on either side is discordant.
+# ==============================================================================
+
+
+build_original_topology <- function(
+  assignment_df
+) {
+
+  topology_edges <- assignment_df %>%
+    dplyr::count(
+      Species,
+      Full_Seq_Family,
+      Five_Prime_Family,
+      name =
+        "Pair_Size"
+    ) %>%
+    dplyr::mutate(
+
+      Full_Node =
+        paste0(
+          Species,
+          "::FULL::",
+          Full_Seq_Family
+        ),
+
+      Five_Node =
+        paste0(
+          Species,
+          "::FIVE::",
+          Five_Prime_Family
+        )
+    )
+
+
+  graph_object <-
+    igraph::graph_from_data_frame(
+      topology_edges %>%
+        dplyr::select(
+          Full_Node,
+          Five_Node
+        ),
+      directed = FALSE
+    )
+
+
+  graph_components <-
+    igraph::components(
+      graph_object
+    )
+
+
+  node_components <-
+    tibble::tibble(
+
+      Node =
+        names(
+          graph_components$membership
+        ),
+
+      Component_ID =
+        as.integer(
+          graph_components$membership
+        )
+    )
+
+
+  topology_edges <-
+    topology_edges %>%
+    dplyr::left_join(
+      node_components,
+      by = c(
+        "Full_Node" =
+          "Node"
+      )
+    )
+
+
+  component_topology <-
+    topology_edges %>%
+    dplyr::group_by(
+      Species,
+      Component_ID
+    ) %>%
+    dplyr::summarise(
+
+      Number_Full_Families =
+        dplyr::n_distinct(
+          Full_Seq_Family
+        ),
+
+      Number_Five_Families =
+        dplyr::n_distinct(
+          Five_Prime_Family
+        ),
+
+      Topology =
+        dplyr::case_when(
+
+          Number_Full_Families == 1 &
+            Number_Five_Families == 1 ~
+            "Concordant",
+
+          Number_Full_Families == 1 &
+            Number_Five_Families > 1 ~
+            "Split-associated",
+
+          Number_Full_Families > 1 &
+            Number_Five_Families == 1 ~
+            "Merge-associated",
+
+          Number_Full_Families > 1 &
+            Number_Five_Families > 1 ~
+            "Split-and-merge",
+
+          TRUE ~
+            "Other"
+        ),
+
+      .groups =
+        "drop"
+    )
+
+
+  list(
+    edges =
+      topology_edges,
+
+    components =
+      component_topology
+  )
+}
+
+
+original_topology <-
+  build_original_topology(
+    combined_jaccard_elements
+  )
+
+
+topology_edges <-
+  original_topology$edges
+
+
+component_topology <-
+  original_topology$components
+
+
+discordant_components <-
+  component_topology %>%
+  dplyr::filter(
+    Topology !=
+      "Concordant"
+  ) %>%
+  dplyr::select(
+    Species,
+    Component_ID,
+    Topology
+  )
+
+
+# ==============================================================================
+# 16. ATTACH TOPOLOGY TO JACCARD PAIRS AND RETAIN DISCORDANT RELATIONSHIPS
+#
+# This block is copied from the logic in the original script.
+# ==============================================================================
+
+
+jaccard_with_topology <-
+  jaccard_df_all %>%
+
+  dplyr::left_join(
+
+    topology_edges %>%
+      dplyr::select(
+        Species,
+        Full_Seq_Family,
+        Five_Prime_Family,
+        Component_ID
+      ) %>%
+      dplyr::distinct(),
+
+    by = c(
+      "Species",
+      "Full_Seq_Family",
+      "Five_Prime_Family"
+    )
+  ) %>%
+
+  dplyr::left_join(
+
+    discordant_components,
+
+    by = c(
+      "Species",
+      "Component_ID"
+    )
+  )
+
+
+discordant_jaccard_df <-
+  jaccard_with_topology %>%
+  dplyr::filter(
+    !is.na(
+      Topology
+    )
+  ) %>%
+  dplyr::mutate(
+    Species =
+      factor(
+        Species,
+        levels = c(
+          "B73",
+          "Setaria"
+        )
+      )
+  )
+
+
+# ==============================================================================
+# 16A. ORIGINAL SLIDE-2 CHECK
+#
+# The Slide 2 plot supplied with the manuscript has:
+#
+#   Maize   n = 887
+#   Setaria n = 112
+#
+# The original Jaccard workflow must reproduce those values.
+# ==============================================================================
+
+
+panel_a_counts <-
+  discordant_jaccard_df %>%
+  dplyr::count(
+    Species,
+    name = "n"
+  )
+
+
+print(
+  panel_a_counts,
+  n = Inf,
+  width = Inf
+)
+
+
+expected_panel_a_counts <-
+  tibble::tibble(
+
+    Species =
+      factor(
+        c(
+          "B73",
+          "Setaria"
+        ),
+        levels = c(
+          "B73",
+          "Setaria"
+        )
+      ),
+
+    Expected_n =
+      c(
+        887L,
+        112L
+      )
+  )
+
+
+panel_a_count_check <-
+  panel_a_counts %>%
+  dplyr::left_join(
+    expected_panel_a_counts,
+    by = "Species"
+  ) %>%
+  dplyr::mutate(
+    Matches_Slide_2 =
+      n ==
+      Expected_n
+  )
+
+
+print(
+  panel_a_count_check,
+  n = Inf,
+  width = Inf
+)
+
+
+if(
+  any(
+    !panel_a_count_check$Matches_Slide_2
+  )
+) {
+
+  stop(
+    paste0(
+      "\nPANEL A DOES NOT MATCH THE ORIGINAL SLIDE 2 DATA.\n",
+      "Expected: Maize n = 887; Setaria n = 112.\n",
+      "The script has stopped instead of drawing the wrong Panel A.\n",
+      "Please send the printed panel_a_count_check table."
+    )
+  )
+}
+
+
+# ==============================================================================
+# 16B. PANEL A SUMMARY + MEAN LABELS
+# ==============================================================================
+
+
+jaccard_summary <-
+  discordant_jaccard_df %>%
+  dplyr::group_by(
+    Species
+  ) %>%
+  dplyr::summarise(
+
+    n =
+      dplyr::n(),
+
+    Mean_Jaccard =
+      mean(
+        Jaccard_Similarity,
+        na.rm = TRUE
+      ),
+
+    Median_Jaccard =
+      median(
+        Jaccard_Similarity,
+        na.rm = TRUE
+      ),
+
+    .groups =
+      "drop"
+  ) %>%
+  dplyr::mutate(
+
+    n_label =
+      paste0(
+        "n = ",
+        scales::comma(
+          n
+        )
+      ),
+
+    mean_label =
+      paste0(
+        "Mean = ",
+        sprintf(
+          "%.2f",
+          Mean_Jaccard
+        )
+      )
+  )
+
+
+# ==============================================================================
+# 16C. PANEL A — MATCH SLIDE 2 APPEARANCE
+#
+# Slide 2:
+#   Maize   = green  #1B9E77
+#   Setaria = coral  #D55E6A
+#
+# Mean labels are the only addition requested relative to the original slide.
+# ==============================================================================
+
+
+pA <- ggplot2::ggplot(
+  discordant_jaccard_df,
+  ggplot2::aes(
+    x = Species,
+    y = Jaccard_Similarity,
+    fill = Species
+  )
+) +
+
+  ggplot2::geom_violin(
+    trim = TRUE,
+    scale = "width",
+    alpha = 0.75,
+    color = "black",
+    linewidth = 0.4
+  ) +
+
+  ggplot2::geom_boxplot(
+    width = 0.12,
+    fill = "white",
+    outlier.shape = NA,
+    color = "black",
+    linewidth = 0.45
+  ) +
+
+  ggplot2::stat_summary(
+    fun = mean,
+    geom = "point",
+    shape = 23,
+    size = 2.5,
+    fill = "white",
+    color = "black"
+  ) +
+
+  ggplot2::geom_text(
+    data =
+      jaccard_summary,
+
+    ggplot2::aes(
+      x = Species,
+      y = 1.045,
+      label = n_label
+    ),
+
+    inherit.aes =
+      FALSE,
+
+    size =
+      2.8,
+
+    color =
+      "black"
+  ) +
+
+  ggplot2::geom_text(
+    data =
+      jaccard_summary,
+
+    ggplot2::aes(
+      x = Species,
+      y = 0.995,
+      label = mean_label
+    ),
+
+    inherit.aes =
+      FALSE,
+
+    size =
+      2.8,
+
+    fontface =
+      "bold",
+
+    color =
+      "black"
+  ) +
+
+  ggplot2::scale_fill_manual(
+    values = c(
+      "B73" =
+        divergent_palette[2],
+      "Setaria" =
+        divergent_palette[6]
+    )
+  ) +
+
+  ggplot2::scale_x_discrete(
+    labels = c(
+      "B73" =
+        "Maize",
+      "Setaria" =
+        "Setaria"
+    )
+  ) +
+
+  ggplot2::scale_y_continuous(
+    limits = c(
+      0,
+      1.08
+    ),
+    breaks = seq(
+      0,
+      1,
+      0.25
+    ),
+    expand = c(
+      0,
+      0
+    )
+  ) +
+
+  ggplot2::labs(
+    x = NULL,
+    y = "Jaccard similarity"
+  ) +
+
+  publication_theme +
+
+  ggplot2::theme(
+    legend.position =
+      "none"
+  )
+
+
+# ==============================================================================
+# 17. PANEL B DATA — LTR IDENTITY
+#
+# LTR identity comes directly from the full-sequence SiLiX attributes used in
+# the original age analysis.
+# ==============================================================================
+
+age_df <- combined_te_status %>%
+  dplyr::filter(
+    !is.na(LTR_Identity)
+  ) %>%
+  dplyr::mutate(
+    Species = factor(
+      Species,
+      levels = c(
+        "B73",
+        "Setaria"
+      )
+    ),
+    Clustering_Status = factor(
+      Clustering_Status,
+      levels = c(
+        "Clustering concordance",
+        "Clustering discordance"
+      )
+    )
+  )
+
+
+age_summary <- age_df %>%
+  dplyr::group_by(
+    Species,
+    Clustering_Status
+  ) %>%
+  dplyr::summarise(
+
+    n =
+      dplyr::n_distinct(
+        TE_ID
+      ),
+
+    Mean_LTR_Identity =
+      mean(
+        LTR_Identity,
+        na.rm = TRUE
+      ),
+
+    .groups = "drop"
+  ) %>%
+  dplyr::mutate(
+
+    n_label = paste0(
+      "n = ",
+      scales::comma(n)
+    ),
+
+    mean_label = paste0(
+      "Mean = ",
+      sprintf(
+        "%.3f",
+        Mean_LTR_Identity
+      )
+    )
+  )
+
+
+# ==============================================================================
+# 18. PANEL B — LTR IDENTITY
+# ==============================================================================
+
+age_y_min <- floor(
+  min(
+    age_df$LTR_Identity,
+    na.rm = TRUE
+  ) * 20
+) / 20
+
+
+pB <- ggplot2::ggplot(
+  age_df,
+  ggplot2::aes(
+    x = Clustering_Status,
+    y = LTR_Identity,
+    fill = Clustering_Status
+  )
+) +
+
+  ggplot2::geom_violin(
+    trim = TRUE,
+    alpha = 0.78,
+    color = "black",
+    linewidth = 0.45
+  ) +
+
+  ggplot2::geom_boxplot(
+    width = 0.12,
+    fill = "white",
+    outlier.shape = NA,
+    color = "black",
+    linewidth = 0.45
+  ) +
+
+  ggplot2::stat_summary(
+    fun = mean,
+    geom = "point",
+    shape = 23,
+    size = 2.5,
+    fill = "white",
+    color = "black"
+  ) +
+
+  ggplot2::geom_text(
+    data = age_summary,
+    ggplot2::aes(
+      x = Clustering_Status,
+      y = 1.016,
+      label = n_label
+    ),
+    inherit.aes = FALSE,
+    size = 2.5
+  ) +
+
+  ggplot2::geom_text(
+    data = age_summary,
+    ggplot2::aes(
+      x = Clustering_Status,
+      y = 0.998,
+      label = mean_label
+    ),
+    inherit.aes = FALSE,
+    size = 2.4,
+    fontface = "bold"
+  ) +
+
+  ggplot2::facet_wrap(
+    ~Species,
+    nrow = 1,
+    labeller = ggplot2::as_labeller(
+      c(
+        "B73" = "Maize",
+        "Setaria" = "Setaria"
+      )
+    )
+  ) +
+
+  ggplot2::scale_fill_manual(
+    values = status_colors
+  ) +
+
+  ggplot2::scale_x_discrete(
+    labels = c(
+      "Clustering concordance" =
+        "Concordant",
+      "Clustering discordance" =
+        "Discordant"
+    )
+  ) +
+
+  ggplot2::scale_y_continuous(
+    limits = c(
+      age_y_min,
+      1.03
+    ),
+    expand = ggplot2::expansion(
+      mult = c(
+        0.01,
+        0
+      )
+    )
+  ) +
+
+  ggplot2::labs(
+    x = NULL,
+    y = "LTR identity"
+  ) +
+
+  publication_theme +
+
+  ggplot2::theme(
+    legend.position = "none",
+    axis.text.x = ggplot2::element_text(
+      size = 8
+    ),
+    panel.spacing.x = grid::unit(
+      0.45,
+      "cm"
+    )
+  )
+
+
+# ==============================================================================
+# 19. PANEL C DATA — SUPERFAMILY
+#
+# This follows the ORIGINAL enrichment analysis:
+#
+# Relative enrichment =
+#
+#     proportion of discordant TEs in superfamily
+#     --------------------------------------------
+#     genome-wide proportion of TEs in superfamily
+#
+# Classification is taken directly from the same full-sequence records used
+# for the TE assignments.
+# ==============================================================================
+
+te_superfamily_status <- combined_te_status %>%
+  dplyr::select(
+    Species,
+    TE_ID,
+    Clustering_Status,
+    Classification
+  ) %>%
+  dplyr::distinct(
+    Species,
+    TE_ID,
+    .keep_all = TRUE
+  ) %>%
+  dplyr::mutate(
+
+    LTR_Superfamily =
+      dplyr::case_when(
+
+        grepl(
+          "Copia",
+          Classification,
+          ignore.case = TRUE
+        ) ~
+          "Ty1/Copia",
+
+        grepl(
+          "Gypsy|Ty3",
+          Classification,
+          ignore.case = TRUE
+        ) ~
+          "Ty3",
+
+        grepl(
+          "LTR",
+          Classification,
+          ignore.case = TRUE
+        ) ~
+          "Other",
+
+        TRUE ~
+          NA_character_
+      ),
+
+    Discordant =
+      dplyr::if_else(
+        Clustering_Status ==
+          "Clustering discordance",
+        1L,
+        0L
+      )
+  ) %>%
+  dplyr::filter(
+    !is.na(LTR_Superfamily),
+    !is.na(Discordant)
+  ) %>%
+  dplyr::mutate(
+
+    Species = factor(
+      Species,
+      levels = c(
+        "B73",
+        "Setaria"
+      )
+    ),
+
+    LTR_Superfamily = factor(
+      LTR_Superfamily,
+      levels = c(
+        "Ty1/Copia",
+        "Ty3",
+        "Other"
+      )
+    )
+  )
+
+
+# ==============================================================================
+# 20. PANEL C — GENOME-WIDE SUPERFAMILY COMPOSITION
+# ==============================================================================
+
+genomewide_superfamily <- te_superfamily_status %>%
+  dplyr::count(
+    Species,
+    LTR_Superfamily,
+    name = "Genomewide_Number_of_TEs"
+  ) %>%
+  dplyr::group_by(
+    Species
+  ) %>%
+  dplyr::mutate(
+
+    Genomewide_Total_TEs =
+      sum(
+        Genomewide_Number_of_TEs
+      ),
+
+    Genomewide_Proportion =
+      Genomewide_Number_of_TEs /
+      Genomewide_Total_TEs
+  ) %>%
+  dplyr::ungroup()
+
+
+# ==============================================================================
+# 21. PANEL C — DISCORDANT SUPERFAMILY COMPOSITION
+# ==============================================================================
+
+discordant_superfamily <- te_superfamily_status %>%
+  dplyr::filter(
+    Discordant == 1
+  ) %>%
+  dplyr::count(
+    Species,
+    LTR_Superfamily,
+    name = "Discordant_Number_of_TEs"
+  ) %>%
+  dplyr::group_by(
+    Species
+  ) %>%
+  dplyr::mutate(
+
+    Total_Discordant_TEs =
+      sum(
+        Discordant_Number_of_TEs
+      ),
+
+    Discordant_Proportion =
+      Discordant_Number_of_TEs /
+      Total_Discordant_TEs
+  ) %>%
+  dplyr::ungroup()
+
+
+# ==============================================================================
+# 22. PANEL C — RELATIVE ENRICHMENT
+# ==============================================================================
+
+superfamily_enrichment <- genomewide_superfamily %>%
+  dplyr::left_join(
+    discordant_superfamily,
+    by = c(
+      "Species",
+      "LTR_Superfamily"
+    )
+  ) %>%
+  dplyr::mutate(
+
+    Discordant_Number_of_TEs =
+      tidyr::replace_na(
+        Discordant_Number_of_TEs,
+        0L
+      ),
+
+    Discordant_Proportion =
+      tidyr::replace_na(
+        Discordant_Proportion,
+        0
+      ),
+
+    Relative_Enrichment =
+      Discordant_Proportion /
+      Genomewide_Proportion,
+
+    Enrichment_Deviation =
+      Relative_Enrichment -
+      1,
+
+    Enrichment_Label =
+      paste0(
+        sprintf(
+          "%.2f",
+          Relative_Enrichment
+        ),
+        "×"
+      ),
+
+    Label_Y =
+      dplyr::if_else(
+        Enrichment_Deviation >= 0,
+        Enrichment_Deviation + 0.07,
+        Enrichment_Deviation - 0.07
+      )
+  )
+
+
+# ==============================================================================
+# 23. PANEL C — DIVERGING ENRICHMENT PLOT
+#
+# Relative enrichment = 1 is the null expectation.
+#
+# For display:
+#
+#   Relative enrichment - 1
+#
+# Therefore:
+#   > 0 = enriched
+#   < 0 = depleted
+# ==============================================================================
+
+panel_c_lower <- min(
+  c(
+    superfamily_enrichment$Enrichment_Deviation,
+    superfamily_enrichment$Label_Y
+  ),
+  na.rm = TRUE
+) - 0.10
+
+
+panel_c_upper <- max(
+  c(
+    superfamily_enrichment$Enrichment_Deviation,
+    superfamily_enrichment$Label_Y
+  ),
+  na.rm = TRUE
+) + 0.10
+
+
+pC <- ggplot2::ggplot(
+  superfamily_enrichment,
+  ggplot2::aes(
+    x = LTR_Superfamily,
+    y = Enrichment_Deviation,
+    fill = LTR_Superfamily
+  )
+) +
+
+  ggplot2::geom_hline(
+    yintercept = 0,
+    linetype = "dashed",
+    linewidth = 0.6,
+    color = "black"
+  ) +
+
+  ggplot2::geom_col(
+    width = 0.65,
+    color = "black",
+    linewidth = 0.45
+  ) +
+
+  ggplot2::geom_text(
+    ggplot2::aes(
+      y = Label_Y,
+      label = Enrichment_Label
+    ),
+    size = 3.1,
+    fontface = "bold",
+    color = "black"
+  ) +
+
+  ggplot2::facet_wrap(
+    ~Species,
+    nrow = 1,
+    labeller = ggplot2::as_labeller(
+      c(
+        "B73" = "Maize",
+        "Setaria" = "Setaria"
+      )
+    )
+  ) +
+
+  ggplot2::scale_fill_manual(
+    values = superfamily_colors,
+    drop = FALSE
+  ) +
+
+  ggplot2::scale_y_continuous(
+    limits = c(
+      panel_c_lower,
+      panel_c_upper
+    ),
+    breaks = scales::pretty_breaks(
+      n = 5
+    ),
+    expand = c(
+      0,
+      0
+    )
+  ) +
+
+  ggplot2::labs(
+    x = "LTR superfamily",
+    y = "Relative enrichment\namong discordant TEs"
+  ) +
+
+  publication_theme +
+
+  ggplot2::theme(
+    legend.position = "none",
+    panel.spacing.x = grid::unit(
+      0.45,
+      "cm"
+    ),
+    axis.text.x = ggplot2::element_text(
+      size = 8.5
+    )
+  )
+
+
+# ==============================================================================
+# 24. ASSEMBLE FIGURE 2
+# ==============================================================================
+
+figure2 <- pA / pB / pC +
+
+  patchwork::plot_layout(
+    heights = c(
+      0.90,
+      1.08,
+      1.05
+    )
+  ) +
+
+  patchwork::plot_annotation(
+    tag_levels = "A"
+  ) &
+
+  ggplot2::theme(
+    plot.tag = ggplot2::element_text(
+      face = "bold",
+      size = 12
+    ),
+    plot.tag.position = c(
+      0.01,
+      0.99
+    ),
+    plot.margin = ggplot2::margin(
+      4,
+      6,
+      6,
+      6
+    )
+  )
+
+
+# ==============================================================================
+# 25. SAVE FIGURE
+# ==============================================================================
+
+ggplot2::ggsave(
+  filename = file.path(
+    output_dir,
+    "Figure2_full_panel_FINAL.jpeg"
+  ),
+  plot = figure2,
+  width = 7.6,
+  height = 9.0,
+  units = "in",
+  dpi = 600,
+  bg = "white"
+)
+
+
+ggplot2::ggsave(
+  filename = file.path(
+    output_dir,
+    "Figure2_full_panel_FINAL.pdf"
+  ),
+  plot = figure2,
+  width = 7.6,
+  height = 9.0,
+  units = "in",
+  bg = "white"
+)
+
+
+# ==============================================================================
+# 26. VALIDATION OUTPUT
+# ==============================================================================
+
+cat(
+  "\n\n============================================================\n",
+  "INPUT / ID CHECKS\n",
+  "============================================================\n",
+  sep = ""
+)
+
+cat(
+  "B73 full-sequence TEs: ",
+  dplyr::n_distinct(
+    b73_full_with_id$TE_ID
+  ),
+  "\n",
+  sep = ""
+)
+
+cat(
+  "B73 5′ LTR TEs: ",
+  dplyr::n_distinct(
+    b73_five_with_id$TE_ID
+  ),
+  "\n",
+  sep = ""
+)
+
+cat(
+  "B73 matched TEs: ",
+  dplyr::n_distinct(
+    b73_assignments$TE_ID
+  ),
+  "\n\n",
+  sep = ""
+)
+
+cat(
+  "Setaria full-sequence TEs: ",
+  dplyr::n_distinct(
+    setaria_full_with_id$TE_ID
+  ),
+  "\n",
+  sep = ""
+)
+
+cat(
+  "Setaria recovered 5′ LTR TEs: ",
+  dplyr::n_distinct(
+    setaria_five_with_id$TE_ID
+  ),
+  "\n",
+  sep = ""
+)
+
+cat(
+  "Setaria matched TEs: ",
+  dplyr::n_distinct(
+    setaria_assignments$TE_ID
+  ),
+  "\n\n",
+  sep = ""
+)
+
+cat(
+  "Setaria ID recovery:\n"
+)
+
+print(
+  setaria_id_recovery_summary,
+  width = Inf
+)
+
+
+cat(
+  "\n\n============================================================\n",
+  "PANEL A — JACCARD\n",
+  "============================================================\n",
+  sep = ""
+)
+
+print(
+  jaccard_summary,
+  n = Inf,
+  width = Inf
+)
+
+
+cat(
+  "\n\n============================================================\n",
+  "PANEL B — LTR IDENTITY\n",
+  "============================================================\n",
+  sep = ""
+)
+
+print(
+  age_summary,
+  n = Inf,
+  width = Inf
+)
+
+
+cat(
+  "\n\n============================================================\n",
+  "PANEL C — GENOME-WIDE SUPERFAMILY COMPOSITION\n",
+  "============================================================\n",
+  sep = ""
+)
+
+print(
+  genomewide_superfamily,
+  n = Inf,
+  width = Inf
+)
+
+
+cat(
+  "\n\n============================================================\n",
+  "PANEL C — DISCORDANT SUPERFAMILY COMPOSITION\n",
+  "============================================================\n",
+  sep = ""
+)
+
+print(
+  discordant_superfamily,
+  n = Inf,
+  width = Inf
+)
+
+
+cat(
+  "\n\n============================================================\n",
+  "PANEL C — RELATIVE ENRICHMENT\n",
+  "============================================================\n",
+  sep = ""
+)
+
+print(
+  superfamily_enrichment %>%
+    dplyr::select(
+      Species,
+      LTR_Superfamily,
+      Genomewide_Number_of_TEs,
+      Genomewide_Proportion,
+      Discordant_Number_of_TEs,
+      Discordant_Proportion,
+      Relative_Enrichment,
+      Enrichment_Deviation
+    ),
+  n = Inf,
+  width = Inf
+)
+
+
+cat(
+  "\nExpected approximate Slide 2 Panel C values:\n",
+  "Maize:   Ty1/Copia 0.62× | Ty3 1.31× | Other 0.91×\n",
+  "Setaria: Ty1/Copia 0.83× | Ty3 0.77× | Other 2.45×\n\n",
+  sep = ""
+)
+
+
+# ==============================================================================
+# 27. SHOW FIGURE
+# ==============================================================================
+
+print(
+  figure2
+)
+
+```
+```
+```

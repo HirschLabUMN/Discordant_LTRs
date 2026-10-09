@@ -1,0 +1,840 @@
+---
+title: "figure3_complete"
+output: html_document
+date: "2026-09-21"
+---
+
+```{r}
+# ==============================================================================
+# FIGURE 3 — GENE DISTANCE + GENOME-WIDE DISTRIBUTION
+# Reconstructed from the ORIGINAL analysis used for the manuscript slides.
+#
+# IMPORTANT:
+#   * No Figure 3 percentages are hard-coded.
+#   * Individual-TE concordance/discordance uses the original
+#     MUTUAL UNIQUE LARGEST OVERLAP definition.
+#   * Setaria uses the original Setaria_full_sequence_silix.out and
+#     Setaria_five_prime_silix.out files and the original composite TE key.
+#   * Panel A is recalculated from TE coordinates + gene annotations.
+#   * Panel B uses 1-Mb windows; Maize displays Chr1–Chr10 and Setaria Chr1–Chr9.
+# ==============================================================================
+
+suppressPackageStartupMessages({
+  library(data.table)
+  library(dplyr)
+  library(ggplot2)
+  library(scales)
+  library(stringr)
+  library(GenomicRanges)
+  library(IRanges)
+  library(S4Vectors)
+  library(patchwork)
+})
+
+# ==============================================================================
+# 1. SETTINGS
+# ==============================================================================
+
+output_dir <- "final_panel_figures"
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+
+b73_full_path <- paste0(
+  "/projects/standard/hirschc1/menar060/",
+  "family_analysis/redo_full_sequence/B73/output/",
+  "B73_full_sequence_silix.out"
+)
+
+b73_five_path <- paste0(
+  "/projects/standard/hirschc1/menar060/",
+  "family_analysis/redo_five_prime/B73/output/",
+  "B73_five_prime_silix.out"
+)
+
+# These are the Setaria files used in the original individual-TE analysis.
+setaria_full_path <- paste0(
+  "/projects/standard/hirschc1/menar060/",
+  "family_analysis/redo_full_sequence/Setaria/",
+  "Setaria_full_sequence_silix.out"
+)
+
+setaria_five_path <- paste0(
+  "/projects/standard/hirschc1/menar060/",
+  "family_analysis/redo_five_prime/Setaria/",
+  "Setaria_five_prime_silix.out"
+)
+
+b73_gene_gff <- paste0(
+  "/projects/standard/hirschc1/menar060/",
+  "programs/input_data/maize/",
+  "B73v5_genes.gff3"
+)
+
+setaria_gtf_path <- file.path(
+  "/projects/standard/hirschc1/shared/projects/Setaria_TEs/andyTEs",
+  "SvMEV034.gtf"
+)
+
+required_files <- c(
+  b73_full_path,
+  b73_five_path,
+  setaria_full_path,
+  setaria_five_path,
+  b73_gene_gff,
+  setaria_gtf_path
+)
+
+missing_files <- required_files[!file.exists(required_files)]
+if (length(missing_files) > 0) {
+  stop(
+    "The following required files were not found:\n",
+    paste(missing_files, collapse = "\n")
+  )
+}
+
+# ==============================================================================
+# 2. COLORS / THEME
+# ==============================================================================
+
+divergent_palette <- c(
+  "#27408B", "#1B9E77", "#2AA198", "#56B4E9",
+  "#E6AB02", "#D55E6A", "#984EA3", "#7F1D3A"
+)
+
+status_colors <- c(
+  "Clustering concordance" = divergent_palette[1],
+  "Clustering discordance" = divergent_palette[8]
+)
+
+publication_theme <- theme_classic(base_size = 10) +
+  theme(
+    axis.title = element_text(face = "bold"),
+    strip.text = element_text(face = "bold"),
+    legend.title = element_text(face = "bold")
+  )
+
+# ==============================================================================
+# 3. ORIGINAL SILIX ATTRIBUTE HELPERS
+# ==============================================================================
+
+extract_silix_attribute <- function(attribute_string, attribute_name) {
+  attribute_string <- as.character(attribute_string)
+  pattern <- paste0("(?:^|;)", attribute_name, "=([^;]+)")
+  extracted_value <- sub(
+    paste0(".*", pattern, ".*"),
+    "\\1",
+    attribute_string,
+    perl = TRUE
+  )
+  no_match <- !grepl(pattern, attribute_string, perl = TRUE)
+  extracted_value[no_match] <- NA_character_
+  extracted_value
+}
+
+extract_silix_chromosome <- function(attribute_string) {
+  result <- sub(
+    ".*::([^:]+):[0-9]+-[0-9]+\\([^)]*\\)$",
+    "\\1",
+    as.character(attribute_string),
+    perl = TRUE
+  )
+  matched <- grepl(
+    "::[^:]+:[0-9]+-[0-9]+\\([^)]*\\)$",
+    as.character(attribute_string),
+    perl = TRUE
+  )
+  result[!matched] <- NA_character_
+  result
+}
+
+extract_silix_start <- function(attribute_string) {
+  result <- sub(
+    ".*::[^:]+:([0-9]+)-[0-9]+\\([^)]*\\)$",
+    "\\1",
+    as.character(attribute_string),
+    perl = TRUE
+  )
+  matched <- grepl(
+    "::[^:]+:[0-9]+-[0-9]+\\([^)]*\\)$",
+    as.character(attribute_string),
+    perl = TRUE
+  )
+  result[!matched] <- NA_character_
+  suppressWarnings(as.integer(result))
+}
+
+extract_silix_end <- function(attribute_string) {
+  result <- sub(
+    ".*::[^:]+:[0-9]+-([0-9]+)\\([^)]*\\)$",
+    "\\1",
+    as.character(attribute_string),
+    perl = TRUE
+  )
+  matched <- grepl(
+    "::[^:]+:[0-9]+-[0-9]+\\([^)]*\\)$",
+    as.character(attribute_string),
+    perl = TRUE
+  )
+  result[!matched] <- NA_character_
+  suppressWarnings(as.integer(result))
+}
+
+# ==============================================================================
+# 4. READ ORIGINAL FOUR SILIX FILES
+# ==============================================================================
+
+read_silix <- function(path) {
+  data.table::fread(
+    path,
+    header = FALSE,
+    sep = "\t",
+    select = 1:2,
+    col.names = c("Family_ID", "Element_Attributes")
+  )
+}
+
+b73_full_dt <- read_silix(b73_full_path)
+b73_five_dt <- read_silix(b73_five_path)
+setaria_full_dt <- read_silix(setaria_full_path)
+setaria_five_dt <- read_silix(setaria_five_path)
+
+# ==============================================================================
+# 5. BUILD B73 ASSIGNMENTS EXACTLY AS IN ORIGINAL ANALYSIS
+# ==============================================================================
+
+b73_full_assignments <- b73_full_dt %>%
+  mutate(
+    TE_ID = extract_silix_attribute(Element_Attributes, "ID"),
+    TE_Name = extract_silix_attribute(Element_Attributes, "Name"),
+    Parent_ID = extract_silix_attribute(Element_Attributes, "Parent"),
+    Chromosome = extract_silix_chromosome(Element_Attributes),
+    TE_Start = extract_silix_start(Element_Attributes),
+    TE_End = extract_silix_end(Element_Attributes),
+    Full_Seq_Family = paste0("B73_Full_", Family_ID)
+  ) %>%
+  filter(!is.na(TE_ID), grepl("^LTRRT_", TE_ID)) %>%
+  select(
+    TE_ID, TE_Name, Parent_ID, Chromosome,
+    TE_Start, TE_End, Full_Seq_Family
+  ) %>%
+  distinct(TE_ID, .keep_all = TRUE)
+
+b73_five_assignments <- b73_five_dt %>%
+  mutate(
+    Five_Prime_LTR_ID = extract_silix_attribute(Element_Attributes, "ID"),
+    TE_ID = sub("^lLTR_", "LTRRT_", Five_Prime_LTR_ID),
+    Five_Prime_Family = paste0("B73_5prime_", Family_ID)
+  ) %>%
+  filter(!is.na(Five_Prime_LTR_ID), grepl("^lLTR_", Five_Prime_LTR_ID)) %>%
+  select(TE_ID, Five_Prime_LTR_ID, Five_Prime_Family) %>%
+  distinct(TE_ID, .keep_all = TRUE)
+
+b73_te_assignments <- b73_full_assignments %>%
+  inner_join(b73_five_assignments, by = "TE_ID") %>%
+  mutate(Species = "B73") %>%
+  distinct(TE_ID, .keep_all = TRUE)
+
+# ==============================================================================
+# 6. BUILD SETARIA ASSIGNMENTS EXACTLY AS IN ORIGINAL ANALYSIS
+#
+# Setaria raw IDs can be reused, so the original analysis used a composite key:
+# normalized TE ID + Parent + Chromosome.
+# ==============================================================================
+
+setaria_full_assignments <- setaria_full_dt %>%
+  mutate(
+    Raw_TE_ID = extract_silix_attribute(Element_Attributes, "ID"),
+    Parent_ID = extract_silix_attribute(Element_Attributes, "Parent"),
+    TE_Name = extract_silix_attribute(Element_Attributes, "Name"),
+    Chromosome = extract_silix_chromosome(Element_Attributes),
+    TE_Start = extract_silix_start(Element_Attributes),
+    TE_End = extract_silix_end(Element_Attributes),
+    Normalized_TE_ID = sub("^LTRRT_", "", Raw_TE_ID),
+    Full_Seq_Family = paste0("Setaria_Full_", Family_ID),
+    TE_ID = paste(Normalized_TE_ID, Parent_ID, Chromosome, sep = "::")
+  ) %>%
+  filter(!is.na(Raw_TE_ID), !is.na(Parent_ID), !is.na(Chromosome)) %>%
+  select(
+    TE_ID, Normalized_TE_ID, Raw_TE_ID, TE_Name, Parent_ID,
+    Chromosome, TE_Start, TE_End, Full_Seq_Family
+  ) %>%
+  distinct(TE_ID, .keep_all = TRUE)
+
+setaria_five_assignments <- setaria_five_dt %>%
+  mutate(
+    Five_Prime_LTR_ID = extract_silix_attribute(Element_Attributes, "ID"),
+    Parent_ID = extract_silix_attribute(Element_Attributes, "Parent"),
+    Chromosome = extract_silix_chromosome(Element_Attributes),
+    Normalized_TE_ID = sub("^lLTR_", "", Five_Prime_LTR_ID),
+    Five_Prime_Family = paste0("Setaria_5prime_", Family_ID),
+    TE_ID = paste(Normalized_TE_ID, Parent_ID, Chromosome, sep = "::")
+  ) %>%
+  filter(
+    !is.na(Five_Prime_LTR_ID),
+    grepl("^lLTR_", Five_Prime_LTR_ID),
+    !is.na(Parent_ID),
+    !is.na(Chromosome)
+  ) %>%
+  select(
+    TE_ID, Normalized_TE_ID, Five_Prime_LTR_ID,
+    Parent_ID, Chromosome, Five_Prime_Family
+  ) %>%
+  distinct(TE_ID, .keep_all = TRUE)
+
+setaria_te_assignments <- setaria_full_assignments %>%
+  inner_join(
+    setaria_five_assignments %>%
+      select(TE_ID, Five_Prime_LTR_ID, Five_Prime_Family),
+    by = "TE_ID"
+  ) %>%
+  mutate(Species = "Setaria") %>%
+  distinct(TE_ID, .keep_all = TRUE)
+
+# ==============================================================================
+# 7. ORIGINAL INDIVIDUAL-TE CONCORDANCE/DISCORDANCE FUNCTION
+#
+# This is NOT strict one-to-one family matching.
+# A TE is concordant when its full × 5' pair is the unique largest overlap in
+# BOTH clustering directions. Ties/minority overlaps are discordant.
+# ==============================================================================
+
+classify_individual_te_status <- function(assignment_df, species_name) {
+
+  clean_assignments <- assignment_df %>%
+    filter(
+      !is.na(TE_ID),
+      !is.na(Full_Seq_Family),
+      !is.na(Five_Prime_Family)
+    ) %>%
+    distinct(TE_ID, .keep_all = TRUE)
+
+  pair_counts <- clean_assignments %>%
+    count(Full_Seq_Family, Five_Prime_Family, name = "Pair_Size")
+
+  pair_classification <- pair_counts %>%
+    group_by(Full_Seq_Family) %>%
+    mutate(
+      Largest_Pair_in_Full = max(Pair_Size),
+      Number_Tied_for_Full_Max = sum(Pair_Size == Largest_Pair_in_Full),
+      Unique_Full_Maximum =
+        Pair_Size == Largest_Pair_in_Full & Number_Tied_for_Full_Max == 1
+    ) %>%
+    ungroup() %>%
+    group_by(Five_Prime_Family) %>%
+    mutate(
+      Largest_Pair_in_Five = max(Pair_Size),
+      Number_Tied_for_Five_Max = sum(Pair_Size == Largest_Pair_in_Five),
+      Unique_Five_Maximum =
+        Pair_Size == Largest_Pair_in_Five & Number_Tied_for_Five_Max == 1
+    ) %>%
+    ungroup() %>%
+    mutate(
+      Mutual_Unique_Largest = Unique_Full_Maximum & Unique_Five_Maximum,
+      Clustering_Status = if_else(
+        Mutual_Unique_Largest,
+        "Clustering concordance",
+        "Clustering discordance"
+      )
+    )
+
+  clean_assignments %>%
+    left_join(
+      pair_classification,
+      by = c("Full_Seq_Family", "Five_Prime_Family")
+    ) %>%
+    mutate(
+      Species = species_name,
+      Clustering_Status = factor(
+        Clustering_Status,
+        levels = c("Clustering concordance", "Clustering discordance")
+      )
+    )
+}
+
+b73_individual_te_status <- classify_individual_te_status(
+  b73_te_assignments, "B73"
+)
+
+setaria_individual_te_status <- classify_individual_te_status(
+  setaria_te_assignments, "Setaria"
+)
+
+cat("\nINDIVIDUAL-TE STATUS COUNTS\n")
+print(
+  bind_rows(
+    b73_individual_te_status %>% select(Species, TE_ID, Clustering_Status),
+    setaria_individual_te_status %>% select(Species, TE_ID, Clustering_Status)
+  ) %>%
+    distinct(Species, TE_ID, .keep_all = TRUE) %>%
+    count(Species, Clustering_Status),
+  n = Inf
+)
+
+# ==============================================================================
+# 8. B73 DISTANCE TO NEAREST GENE — ORIGINAL ANALYSIS
+# ==============================================================================
+
+b73_gene_table <- data.table::fread(
+  b73_gene_gff,
+  header = FALSE,
+  sep = "\t",
+  quote = "",
+  fill = TRUE,
+  comment.char = "#",
+  col.names = c(
+    "seqid", "source", "type", "start", "end",
+    "score", "strand", "phase", "attributes"
+  )
+)
+
+b73_genes <- b73_gene_table %>%
+  filter(type == "gene", !is.na(start), !is.na(end)) %>%
+  transmute(
+    Chromosome = as.character(seqid),
+    Gene_Start = as.integer(start),
+    Gene_End = as.integer(end),
+    Gene_ID = coalesce(
+      extract_silix_attribute(attributes, "ID"),
+      extract_silix_attribute(attributes, "Name")
+    )
+  ) %>%
+  distinct(Chromosome, Gene_Start, Gene_End, .keep_all = TRUE)
+
+b73_distance_input <- b73_individual_te_status %>%
+  select(TE_ID, Clustering_Status) %>%
+  distinct(TE_ID, .keep_all = TRUE) %>%
+  inner_join(
+    b73_te_assignments %>%
+      select(TE_ID, Chromosome, TE_Start, TE_End) %>%
+      distinct(TE_ID, .keep_all = TRUE),
+    by = "TE_ID"
+  )
+
+shared_b73_chr <- intersect(
+  unique(b73_distance_input$Chromosome),
+  unique(b73_genes$Chromosome)
+)
+
+b73_distance_input <- b73_distance_input %>%
+  filter(Chromosome %in% shared_b73_chr)
+b73_genes <- b73_genes %>%
+  filter(Chromosome %in% shared_b73_chr)
+
+b73_te_gr <- GRanges(
+  seqnames = b73_distance_input$Chromosome,
+  ranges = IRanges(
+    start = b73_distance_input$TE_Start,
+    end = b73_distance_input$TE_End
+  ),
+  TE_ID = b73_distance_input$TE_ID,
+  Clustering_Status = as.character(b73_distance_input$Clustering_Status)
+)
+
+b73_gene_gr <- GRanges(
+  seqnames = b73_genes$Chromosome,
+  ranges = IRanges(start = b73_genes$Gene_Start, end = b73_genes$Gene_End),
+  Gene_ID = b73_genes$Gene_ID
+)
+
+b73_nearest <- distanceToNearest(
+  b73_te_gr,
+  b73_gene_gr,
+  ignore.strand = TRUE
+)
+
+b73_te_gene_distance <- tibble(
+  TE_Index = queryHits(b73_nearest),
+  Gene_Index = subjectHits(b73_nearest),
+  Distance_to_Nearest_Gene = mcols(b73_nearest)$distance
+) %>%
+  mutate(
+    TE_ID = mcols(b73_te_gr)$TE_ID[TE_Index],
+    Clustering_Status = mcols(b73_te_gr)$Clustering_Status[TE_Index],
+    Nearest_Gene = mcols(b73_gene_gr)$Gene_ID[Gene_Index],
+    Species = "B73"
+  ) %>%
+  select(
+    TE_ID, Species, Clustering_Status,
+    Nearest_Gene, Distance_to_Nearest_Gene
+  )
+
+# ==============================================================================
+# 9. SETARIA DISTANCE TO NEAREST GENE — ORIGINAL ANALYSIS
+#
+# The original analysis collapsed transcript isoforms to one interval per gene.
+# ==============================================================================
+
+setaria_gtf <- data.table::fread(
+  setaria_gtf_path,
+  sep = "\t",
+  header = FALSE,
+  quote = "",
+  fill = TRUE,
+  comment.char = "#",
+  col.names = c(
+    "Chr", "Source", "Feature", "Start", "End",
+    "Score", "Strand", "Frame", "Attributes"
+  )
+)
+
+setaria_genes <- setaria_gtf %>%
+  filter(Feature == "transcript") %>%
+  mutate(
+    Gene_ID_Raw = stringr::str_match(
+      Attributes,
+      'gene_id "([^"]+)"'
+    )[, 2],
+    Gene_ID = sub("-mRNA-.*$", "", Gene_ID_Raw)
+  ) %>%
+  filter(!is.na(Gene_ID)) %>%
+  group_by(Chr, Gene_ID) %>%
+  summarise(
+    Start = min(Start, na.rm = TRUE),
+    End = max(End, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Use the SAME Setaria TE coordinates that were carried through the original
+# full-sequence assignment table. This preserves the composite individual-TE key.
+setaria_distance_input <- setaria_individual_te_status %>%
+  select(TE_ID, Clustering_Status) %>%
+  distinct(TE_ID, .keep_all = TRUE) %>%
+  inner_join(
+    setaria_te_assignments %>%
+      select(TE_ID, Chromosome, TE_Start, TE_End) %>%
+      distinct(TE_ID, .keep_all = TRUE),
+    by = "TE_ID"
+  )
+
+shared_setaria_chr <- intersect(
+  unique(setaria_distance_input$Chromosome),
+  unique(setaria_genes$Chr)
+)
+
+setaria_distance_input <- setaria_distance_input %>%
+  filter(Chromosome %in% shared_setaria_chr)
+setaria_genes <- setaria_genes %>%
+  filter(Chr %in% shared_setaria_chr)
+
+setaria_te_gr <- GRanges(
+  seqnames = setaria_distance_input$Chromosome,
+  ranges = IRanges(
+    start = setaria_distance_input$TE_Start,
+    end = setaria_distance_input$TE_End
+  ),
+  TE_ID = setaria_distance_input$TE_ID,
+  Clustering_Status = as.character(setaria_distance_input$Clustering_Status)
+)
+
+setaria_gene_gr <- GRanges(
+  seqnames = setaria_genes$Chr,
+  ranges = IRanges(start = setaria_genes$Start, end = setaria_genes$End),
+  Gene_ID = setaria_genes$Gene_ID
+)
+
+setaria_nearest <- distanceToNearest(
+  setaria_te_gr,
+  setaria_gene_gr,
+  ignore.strand = TRUE
+)
+
+setaria_te_gene_distance <- tibble(
+  TE_Index = queryHits(setaria_nearest),
+  Gene_Index = subjectHits(setaria_nearest),
+  Distance_to_Nearest_Gene = mcols(setaria_nearest)$distance
+) %>%
+  mutate(
+    TE_ID = mcols(setaria_te_gr)$TE_ID[TE_Index],
+    Clustering_Status = mcols(setaria_te_gr)$Clustering_Status[TE_Index],
+    Nearest_Gene = mcols(setaria_gene_gr)$Gene_ID[Gene_Index],
+    Species = "Setaria"
+  ) %>%
+  select(
+    TE_ID, Species, Clustering_Status,
+    Nearest_Gene, Distance_to_Nearest_Gene
+  )
+
+# ==============================================================================
+# 10. PANEL A — DISTANCE WINDOWS
+# ALL VALUES BELOW ARE CALCULATED, NOT HARD-CODED.
+# ==============================================================================
+
+gene_distance_all <- bind_rows(
+  b73_te_gene_distance,
+  setaria_te_gene_distance
+) %>%
+  mutate(
+    Gene_Distance_Window = case_when(
+      Distance_to_Nearest_Gene == 0 ~ "Inside gene",
+      Distance_to_Nearest_Gene <= 1000 ~ "0–1 kb",
+      Distance_to_Nearest_Gene <= 5000 ~ "1–5 kb",
+      Distance_to_Nearest_Gene <= 10000 ~ "5–10 kb",
+      Distance_to_Nearest_Gene > 10000 ~ ">10 kb",
+      TRUE ~ NA_character_
+    ),
+    Gene_Distance_Window = factor(
+      Gene_Distance_Window,
+      levels = c("Inside gene", "0–1 kb", "1–5 kb", "5–10 kb", ">10 kb")
+    ),
+    Species = factor(Species, levels = c("B73", "Setaria")),
+    Clustering_Status = factor(
+      Clustering_Status,
+      levels = c("Clustering concordance", "Clustering discordance")
+    )
+  ) %>%
+  filter(!is.na(Gene_Distance_Window), !is.na(Clustering_Status))
+
+gene_window_summary <- gene_distance_all %>%
+  count(
+    Species,
+    Clustering_Status,
+    Gene_Distance_Window,
+    name = "Number_of_TEs",
+    .drop = FALSE
+  ) %>%
+  group_by(Species, Clustering_Status) %>%
+  mutate(
+    Total_TEs = sum(Number_of_TEs),
+    Proportion_of_TEs = Number_of_TEs / Total_TEs,
+    Percent_Label = scales::percent(Proportion_of_TEs, accuracy = 0.1)
+  ) %>%
+  ungroup()
+
+cat("\nPANEL A — CALCULATED GENE-DISTANCE VALUES\n")
+print(gene_window_summary, n = Inf, width = Inf)
+
+cat("\nCHECK — each Species × Status group should sum to 1:\n")
+print(
+  gene_window_summary %>%
+    group_by(Species, Clustering_Status) %>%
+    summarise(Sum = sum(Proportion_of_TEs), .groups = "drop"),
+  n = Inf
+)
+
+pA <- ggplot(
+  gene_window_summary,
+  aes(
+    x = Gene_Distance_Window,
+    y = Proportion_of_TEs,
+    fill = Clustering_Status
+  )
+) +
+  geom_col(
+    position = position_dodge(width = 0.78),
+    width = 0.70,
+    color = "black",
+    linewidth = 0.4
+  ) +
+  facet_wrap(
+    ~Species,
+    nrow = 1,
+    labeller = as_labeller(c("B73" = "Maize", "Setaria" = "Setaria"))
+  ) +
+  scale_fill_manual(values = status_colors, name = NULL, drop = FALSE) +
+  scale_y_continuous(
+    labels = label_percent(accuracy = 1),
+    expand = expansion(mult = c(0, 0.12))
+  ) +
+  labs(
+    x = "Distance to nearest gene",
+    y = "Proportion of individual TEs"
+  ) +
+  publication_theme +
+  theme(
+    legend.position = "top",
+    strip.background = element_blank(),
+    axis.text.x = element_text(
+      size = 8.5,
+      angle = 35,
+      hjust = 1,
+      vjust = 1
+    )
+  )
+
+# ==============================================================================
+# 11. PANEL B — GENOME-WIDE DISCORDANT PROPORTION IN 1-Mb WINDOWS
+#
+# Uses the SAME individual-TE status objects as Panel A.
+# Maize contains Chr1–Chr10; Setaria contains Chr1–Chr9.
+# Chr1–Chr9 use the same ordering in both facets, with Chr10 added only to Maize.
+# ==============================================================================
+
+b73_genome_df <- b73_individual_te_status %>%
+  select(TE_ID, Clustering_Status) %>%
+  distinct(TE_ID, .keep_all = TRUE) %>%
+  inner_join(
+    b73_te_assignments %>%
+      select(TE_ID, Chromosome, TE_Start, TE_End) %>%
+      distinct(TE_ID, .keep_all = TRUE),
+    by = "TE_ID"
+  ) %>%
+  transmute(
+    Species = "B73",
+    TE_ID,
+    Chr = Chromosome,
+    Start = TE_Start,
+    End = TE_End,
+    Clustering_Status
+  )
+
+setaria_genome_df <- setaria_individual_te_status %>%
+  select(TE_ID, Clustering_Status) %>%
+  distinct(TE_ID, .keep_all = TRUE) %>%
+  inner_join(
+    setaria_te_assignments %>%
+      select(TE_ID, Chromosome, TE_Start, TE_End) %>%
+      distinct(TE_ID, .keep_all = TRUE),
+    by = "TE_ID"
+  ) %>%
+  transmute(
+    Species = "Setaria",
+    TE_ID,
+    Chr = Chromosome,
+    Start = TE_Start,
+    End = TE_End,
+    Clustering_Status
+  )
+
+genome_te_df <- bind_rows(b73_genome_df, setaria_genome_df) %>%
+  mutate(
+    Chr_Number = suppressWarnings(as.integer(gsub("[^0-9]", "", Chr))),
+    Midpoint = floor((Start + End) / 2),
+    Discordant = as.integer(Clustering_Status == "Clustering discordance")
+  ) %>%
+  # Keep all 10 maize chromosomes and the 9 Setaria chromosomes.
+  filter(
+    (Species == "B73" & Chr_Number %in% 1:10) |
+    (Species == "Setaria" & Chr_Number %in% 1:9)
+  )
+
+window_size <- 1000000L
+
+window_summary <- genome_te_df %>%
+  mutate(
+    Window_Number = floor((Midpoint - 1) / window_size) + 1,
+    Window_Start = (Window_Number - 1) * window_size + 1
+  ) %>%
+  group_by(Species, Chr_Number, Window_Number, Window_Start) %>%
+  summarise(
+    Total_TEs = n(),
+    Discordant_TEs = sum(Discordant),
+    Discordant_Proportion = Discordant_TEs / Total_TEs,
+    .groups = "drop"
+  ) %>%
+  mutate(
+    Species = factor(Species, levels = c("B73", "Setaria")),
+    Chr_Display = factor(
+      paste0("Chr", Chr_Number),
+      levels = paste0("Chr", 10:1)
+    )
+  )
+
+cat("\nPANEL B — CHROMOSOMES RETAINED\n")
+print(
+  genome_te_df %>%
+    distinct(Species, Chr_Number) %>%
+    arrange(Species, Chr_Number),
+  n = Inf
+)
+
+pB <- ggplot(
+  window_summary,
+  aes(
+    x = Window_Start,
+    y = Chr_Display,
+    fill = Discordant_Proportion
+  )
+) +
+  geom_tile(width = window_size, height = 0.88) +
+  facet_wrap(
+    ~Species,
+    nrow = 1,
+    scales = "free",
+    labeller = as_labeller(c("B73" = "Maize", "Setaria" = "Setaria"))
+  ) +
+  # With free facet scales and drop = TRUE, Chr10 appears only for Maize.
+  # Chr1–Chr9 remain identically ordered in both species.
+  scale_y_discrete(drop = TRUE) +
+  scale_fill_gradientn(
+    colours = c(
+      "white",
+      "#F2D9DE",
+      "#D9A5B0",
+      "#B96578",
+      divergent_palette[8]
+    ),
+    values = scales::rescale(c(0, 0.25, 0.50, 0.75, 1)),
+    limits = c(0, 1),
+    breaks = c(0, 0.25, 0.50, 0.75, 1),
+    labels = label_percent(accuracy = 1),
+    name = "Discordant\nTE proportion"
+  ) +
+  scale_x_continuous(
+    labels = function(x) paste0(x / 1e6, " Mb"),
+    expand = c(0, 0)
+  ) +
+  labs(
+    x = "Genomic position",
+    y = "Chromosome"
+  ) +
+  publication_theme +
+  theme(
+    legend.position = "right",
+    strip.background = element_blank(),
+    axis.text = element_text(size = 8),
+    panel.spacing = grid::unit(1.2, "lines")
+  )
+
+# ==============================================================================
+# 12. COMBINE + SAVE
+# ==============================================================================
+
+figure3 <- pA / pB +
+  plot_layout(heights = c(1, 1.15)) +
+  plot_annotation(tag_levels = "A") &
+  theme(plot.tag = element_text(face = "bold", size = 12))
+
+print(figure3)
+
+ggsave(
+  file.path(output_dir, "Figure3_full_panel_ORIGINAL_ANALYSIS.jpeg"),
+  figure3,
+  width = 7.2,
+  height = 6.4,
+  units = "in",
+  dpi = 600,
+  bg = "white"
+)
+
+ggsave(
+  file.path(output_dir, "Figure3_full_panel_ORIGINAL_ANALYSIS.pdf"),
+  figure3,
+  width = 7.2,
+  height = 6.4,
+  units = "in",
+  bg = "white"
+)
+
+write.table(
+  gene_window_summary,
+  file.path(output_dir, "Figure3_gene_distance_summary.tsv"),
+  sep = "\t",
+  quote = FALSE,
+  row.names = FALSE
+)
+
+write.table(
+  window_summary,
+  file.path(output_dir, "Figure3_1Mb_discordant_windows.tsv"),
+  sep = "\t",
+  quote = FALSE,
+  row.names = FALSE
+)
+
+cat(
+  "\nDone. Figure 3 values were calculated from the original analysis pipeline.\n",
+  "No Panel A percentages were hard-coded.\n"
+)
+
+
+```
+

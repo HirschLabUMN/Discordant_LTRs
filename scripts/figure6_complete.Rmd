@@ -1,0 +1,1084 @@
+---
+title: "figure6_complete"
+output: html_document
+date: "2026-10-01"
+---
+
+```{r}
+# ==============================================================================
+# FIGURE 6 — RL000094: 5' LTR SUBGROUPS, UMR OVERLAP, AND HEAT EXPRESSION
+#
+# Standalone script reconstructed from the original analysis used for slide 6.
+#
+# Figure panels:
+#   A. Structural relationship within full-sequence family RL000094
+#   B. UMR overlap frequency for 5' LTR families RL000099 and RL000584
+#   C. Mean heat expression of individual TEs, with UMR status indicated by shape
+#
+# This script rebuilds all required objects from the original input files.
+# ==============================================================================
+
+# ==============================================================================
+# 1. PACKAGES
+# ==============================================================================
+
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(readr)
+library(ggplot2)
+library(patchwork)
+
+# ==============================================================================
+# 2. INPUT / OUTPUT PATHS
+# ==============================================================================
+
+scratch_dir <-
+  "/projects/standard/hirschc1/menar060/stress_scratch_copy/stress_scratch"
+
+b73_status_path <-
+  "/projects/standard/hirschc1/menar060/family_analysis/clustering_discordance_results/B73_individual_TE_clustering_status.tsv"
+
+umr_overlap_path <-
+  file.path(
+    scratch_dir,
+    "structural_LTRs_overlap_UMR.tsv"
+  )
+
+counts_path <-
+  file.path(
+    scratch_dir,
+    "raw_counts_structural_LTRs_only.txt"
+  )
+
+metadata_path <-
+  file.path(
+    scratch_dir,
+    "metadata.csv"
+  )
+
+output_dir <-
+  "/users/2/menar060/final_panel_figures"
+
+figure6_output_dir <-
+  file.path(
+    output_dir,
+    "Figure6_RL000094"
+  )
+
+dir.create(
+  figure6_output_dir,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+# ==============================================================================
+# 3. COLORS
+# ==============================================================================
+
+rl000094_colors <- c(
+  "RL000099" = "#2AA198",
+  "RL000584" = "#984EA3"
+)
+
+family_levels <- c(
+  "RL000099",
+  "RL000584"
+)
+
+# ==============================================================================
+# 4. LOAD B73 STRUCTURAL TE FAMILY ASSIGNMENTS
+# ==============================================================================
+
+if (!file.exists(b73_status_path)) {
+  stop(
+    "Could not find B73 clustering-status file:\n",
+    b73_status_path
+  )
+}
+
+b73_te_assignments <- readr::read_tsv(
+  b73_status_path,
+  show_col_types = FALSE
+)
+
+required_family_columns <- c(
+  "TE_ID",
+  "TE_Name",
+  "LTR_Identity",
+  "Classification",
+  "Chromosome",
+  "TE_Start",
+  "TE_End",
+  "Full_Seq_Family",
+  "Five_Prime_Family",
+  "Clustering_Status"
+)
+
+missing_family_columns <- setdiff(
+  required_family_columns,
+  names(b73_te_assignments)
+)
+
+if (length(missing_family_columns) > 0) {
+  stop(
+    "Missing columns in B73 clustering-status file: ",
+    paste(missing_family_columns, collapse = ", ")
+  )
+}
+
+structural_family_table <- b73_te_assignments %>%
+  dplyr::select(
+    dplyr::all_of(required_family_columns)
+  ) %>%
+  dplyr::filter(
+    !is.na(TE_ID),
+    !is.na(Full_Seq_Family),
+    !is.na(Five_Prime_Family)
+  ) %>%
+  dplyr::distinct(
+    TE_ID,
+    .keep_all = TRUE
+  )
+
+# ==============================================================================
+# 5. LOAD TE × UMR OVERLAP
+#
+# The original bedtools intersect output stores the structural TE ID in V4.
+# Any structural TE absent from this file is treated as not overlapping a UMR.
+# ==============================================================================
+
+if (!file.exists(umr_overlap_path)) {
+  stop(
+    "Could not find structural TE × UMR overlap file:\n",
+    umr_overlap_path
+  )
+}
+
+umr_overlap <- read.table(
+  umr_overlap_path,
+  sep = "\t",
+  header = FALSE,
+  stringsAsFactors = FALSE,
+  quote = "",
+  fill = TRUE
+)
+
+umr_te_lookup <- umr_overlap %>%
+  dplyr::transmute(
+    TE_ID = as.character(V4),
+    UMR_Overlap = TRUE
+  ) %>%
+  dplyr::filter(
+    grepl("^LTRRT_", TE_ID)
+  ) %>%
+  dplyr::distinct(
+    TE_ID,
+    .keep_all = TRUE
+  )
+
+family_umr_master <- structural_family_table %>%
+  dplyr::transmute(
+    TE_ID = as.character(TE_ID),
+    TE_Name = as.character(TE_Name),
+
+    Full_Family_ID = sub(
+      "^B73_Full_(Fam_)?",
+      "",
+      as.character(Full_Seq_Family)
+    ),
+
+    Five_Prime_Family_ID = sub(
+      "^B73_5prime_(Fam_)?",
+      "",
+      as.character(Five_Prime_Family)
+    ),
+
+    Clustering_Status = as.character(Clustering_Status)
+  ) %>%
+  dplyr::left_join(
+    umr_te_lookup,
+    by = "TE_ID"
+  ) %>%
+  dplyr::mutate(
+    UMR_Overlap = tidyr::replace_na(
+      UMR_Overlap,
+      FALSE
+    ),
+
+    UMR_Status = dplyr::if_else(
+      UMR_Overlap,
+      "UMR overlap",
+      "No UMR overlap"
+    )
+  ) %>%
+  dplyr::distinct(
+    TE_ID,
+    .keep_all = TRUE
+  )
+
+# ==============================================================================
+# 6. REBUILD LOG2(CPM + 1) EXPRESSION MATRIX
+#
+# This matches the expression preprocessing used for the other major figures:
+#   - fractional featureCounts matrix
+#   - retain TEs with count > 1 in at least 2 samples
+#   - CPM normalization by filtered library size
+#   - log2(CPM + 1)
+#   - remove zero-variance TEs
+# ==============================================================================
+
+if (!file.exists(counts_path)) {
+  stop(
+    "Could not find structural TE count matrix:\n",
+    counts_path
+  )
+}
+
+raw_counts <- readr::read_tsv(
+  counts_path,
+  comment = "#",
+  show_col_types = FALSE
+)
+
+annotation_columns <- c(
+  "Geneid",
+  "Chr",
+  "Start",
+  "End",
+  "Strand",
+  "Length"
+)
+
+sample_columns <- setdiff(
+  names(raw_counts),
+  annotation_columns
+)
+
+count_df <- raw_counts %>%
+  dplyr::select(
+    Geneid,
+    dplyr::all_of(sample_columns)
+  ) %>%
+  as.data.frame()
+
+rownames(count_df) <- count_df$Geneid
+count_df$Geneid <- NULL
+
+clean_sample_name <- function(x) {
+  x <- basename(x)
+  x <- sub("_Aligned.*$", "", x)
+  x <- sub("\\.bam$", "", x)
+  x
+}
+
+colnames(count_df) <- clean_sample_name(
+  colnames(count_df)
+)
+
+count_df[] <- lapply(
+  count_df,
+  as.numeric
+)
+
+# ==============================================================================
+# 7. LOAD AND MATCH SAMPLE METADATA
+# ==============================================================================
+
+if (!file.exists(metadata_path)) {
+  stop(
+    "Could not find metadata file:\n",
+    metadata_path
+  )
+}
+
+metadata <- read.csv(
+  metadata_path,
+  check.names = FALSE
+)
+
+if ("SampleID" %in% names(metadata)) {
+  rownames(metadata) <- metadata$SampleID
+} else {
+  rownames(metadata) <- metadata[[1]]
+}
+
+if (!"Condition" %in% names(metadata)) {
+  stop("metadata.csv must contain a Condition column.")
+}
+
+metadata$Condition <- as.character(
+  metadata$Condition
+)
+
+common_samples <- intersect(
+  colnames(count_df),
+  rownames(metadata)
+)
+
+if (length(common_samples) < 2) {
+  stop(
+    "Fewer than two samples matched between counts and metadata."
+  )
+}
+
+count_df <- count_df[
+  ,
+  common_samples,
+  drop = FALSE
+]
+
+metadata <- metadata[
+  common_samples,
+  ,
+  drop = FALSE
+]
+
+stopifnot(
+  identical(
+    colnames(count_df),
+    rownames(metadata)
+  )
+)
+
+count_matrix <- as.matrix(
+  count_df
+)
+
+storage.mode(count_matrix) <- "numeric"
+
+minimum_count <- 1
+minimum_samples <- 2
+
+keep_expressed <- rowSums(
+  count_matrix > minimum_count
+) >= minimum_samples
+
+count_matrix_filtered <- count_matrix[
+  keep_expressed,
+  ,
+  drop = FALSE
+]
+
+library_sizes <- colSums(
+  count_matrix_filtered
+)
+
+cpm_matrix <- sweep(
+  count_matrix_filtered,
+  2,
+  library_sizes,
+  "/"
+) * 1000000
+
+log_cpm_matrix <- log2(
+  cpm_matrix + 1
+)
+
+te_variance <- apply(
+  log_cpm_matrix,
+  1,
+  stats::var
+)
+
+keep_variable <- is.finite(
+  te_variance
+) & te_variance > 0
+
+log_cpm_variable <- log_cpm_matrix[
+  keep_variable,
+  ,
+  drop = FALSE
+]
+
+# ==============================================================================
+# 8. SELECT RL000094 AND ITS TWO MAJOR 5' LTR SUBGROUPS
+# ==============================================================================
+
+rl000094_members <- family_umr_master %>%
+  dplyr::filter(
+    Full_Family_ID == "RL000094",
+    Five_Prime_Family_ID %in% family_levels,
+    TE_ID %in% rownames(log_cpm_variable)
+  ) %>%
+  dplyr::mutate(
+    Five_Prime_Family_ID = factor(
+      Five_Prime_Family_ID,
+      levels = family_levels
+    ),
+
+    UMR_Status = factor(
+      UMR_Status,
+      levels = c(
+        "No UMR overlap",
+        "UMR overlap"
+      )
+    )
+  )
+
+if (nrow(rl000094_members) == 0) {
+  stop(
+    "No expressed RL000094 members were found."
+  )
+}
+
+# ==============================================================================
+# 9. SUMMARY FOR PANELS A AND B
+# ==============================================================================
+
+rl000094_plot_summary <- rl000094_members %>%
+  dplyr::group_by(
+    Five_Prime_Family_ID
+  ) %>%
+  dplyr::summarise(
+    Number_TEs = dplyr::n(),
+    Number_UMR = sum(UMR_Overlap),
+    Percent_UMR = 100 * mean(UMR_Overlap),
+    .groups = "drop"
+  )
+
+print(
+  rl000094_plot_summary,
+  n = Inf,
+  width = Inf
+)
+
+n_099 <- rl000094_plot_summary %>%
+  dplyr::filter(
+    Five_Prime_Family_ID == "RL000099"
+  ) %>%
+  dplyr::pull(Number_TEs)
+
+n_584 <- rl000094_plot_summary %>%
+  dplyr::filter(
+    Five_Prime_Family_ID == "RL000584"
+  ) %>%
+  dplyr::pull(Number_TEs)
+
+# ==============================================================================
+# 10. PANEL A — STRUCTURAL RELATIONSHIP
+# ==============================================================================
+
+pA <- ggplot2::ggplot() +
+
+  ggplot2::annotate(
+    "segment",
+    x = 2,
+    xend = 2,
+    y = 2.35,
+    yend = 1.85,
+    linewidth = 0.7
+  ) +
+
+  ggplot2::annotate(
+    "segment",
+    x = 1,
+    xend = 3,
+    y = 1.85,
+    yend = 1.85,
+    linewidth = 0.7
+  ) +
+
+  ggplot2::annotate(
+    "segment",
+    x = 1,
+    xend = 1,
+    y = 1.85,
+    yend = 1.45,
+    linewidth = 0.7
+  ) +
+
+  ggplot2::annotate(
+    "segment",
+    x = 3,
+    xend = 3,
+    y = 1.85,
+    yend = 1.45,
+    linewidth = 0.7
+  ) +
+
+  ggplot2::annotate(
+    "rect",
+    xmin = 1.25,
+    xmax = 2.75,
+    ymin = 2.35,
+    ymax = 3.05,
+    fill = "white",
+    color = "black",
+    linewidth = 0.7
+  ) +
+
+  ggplot2::annotate(
+    "text",
+    x = 2,
+    y = 2.70,
+    label = "Full sequence\nRL000094",
+    fontface = "bold",
+    size = 4
+  ) +
+
+  ggplot2::annotate(
+    "rect",
+    xmin = 0.35,
+    xmax = 1.65,
+    ymin = 0.65,
+    ymax = 1.45,
+    fill = rl000094_colors["RL000099"],
+    color = "black",
+    linewidth = 0.7
+  ) +
+
+  ggplot2::annotate(
+    "text",
+    x = 1,
+    y = 1.05,
+    label = paste0(
+      "5' LTR\nRL000099\nn = ",
+      n_099
+    ),
+    color = "white",
+    fontface = "bold",
+    size = 3.6
+  ) +
+
+  ggplot2::annotate(
+    "rect",
+    xmin = 2.35,
+    xmax = 3.65,
+    ymin = 0.65,
+    ymax = 1.45,
+    fill = rl000094_colors["RL000584"],
+    color = "black",
+    linewidth = 0.7
+  ) +
+
+  ggplot2::annotate(
+    "text",
+    x = 3,
+    y = 1.05,
+    label = paste0(
+      "5' LTR\nRL000584\nn = ",
+      n_584
+    ),
+    color = "white",
+    fontface = "bold",
+    size = 3.6
+  ) +
+
+  ggplot2::coord_cartesian(
+    xlim = c(0.1, 3.9),
+    ylim = c(0.45, 3.2),
+    clip = "off"
+  ) +
+
+  ggplot2::theme_void() +
+
+  ggplot2::theme(
+    plot.margin = ggplot2::margin(
+      10,
+      10,
+      10,
+      10
+    )
+  )
+
+# ==============================================================================
+# 11. PANEL B — UMR OVERLAP
+# ==============================================================================
+
+pB <- ggplot2::ggplot(
+  rl000094_plot_summary,
+  ggplot2::aes(
+    x = Five_Prime_Family_ID,
+    y = Percent_UMR,
+    fill = Five_Prime_Family_ID
+  )
+) +
+
+  ggplot2::geom_col(
+    width = 0.65,
+    color = "black",
+    linewidth = 0.5
+  ) +
+
+  ggplot2::geom_text(
+    ggplot2::aes(
+      label = paste0(
+        round(Percent_UMR, 0),
+        "%"
+      )
+    ),
+    vjust = -0.45,
+    size = 3.7,
+    fontface = "bold"
+  ) +
+
+  ggplot2::geom_text(
+    ggplot2::aes(
+      y = pmax(
+        Percent_UMR / 2,
+        8
+      ),
+      label = paste0(
+        Number_UMR,
+        "/",
+        Number_TEs
+      )
+    ),
+    color = "white",
+    fontface = "bold",
+    size = 3.5
+  ) +
+
+  ggplot2::scale_fill_manual(
+    values = rl000094_colors
+  ) +
+
+  ggplot2::scale_y_continuous(
+    limits = c(0, 105),
+    breaks = c(
+      0,
+      25,
+      50,
+      75,
+      100
+    ),
+    expand = ggplot2::expansion(
+      mult = c(0, 0)
+    )
+  ) +
+
+  ggplot2::labs(
+    x = "5' LTR family",
+    y = "TEs overlapping a UMR (%)"
+  ) +
+
+  ggplot2::theme_classic(
+    base_size = 11
+  ) +
+
+  ggplot2::theme(
+    legend.position = "none",
+
+    axis.title = ggplot2::element_text(
+      face = "bold"
+    ),
+
+    axis.text.x = ggplot2::element_text(
+      face = "bold"
+    )
+  )
+
+# ==============================================================================
+# 12. BUILD HEAT-EXPRESSION DATA FOR PANEL C
+#
+# Panel C uses actual mean heat expression, log2(CPM + 1), rather than
+# within-TE scaled expression or heat-minus-control response.
+# ==============================================================================
+
+rl000094_expression_matrix <- log_cpm_variable[
+  as.character(
+    rl000094_members$TE_ID
+  ),
+  ,
+  drop = FALSE
+]
+
+rl000094_expression_long <- as.data.frame(
+  rl000094_expression_matrix
+) %>%
+  tibble::rownames_to_column(
+    "TE_ID"
+  ) %>%
+  tidyr::pivot_longer(
+    cols = -TE_ID,
+    names_to = "Sample_ID",
+    values_to = "Expression"
+  ) %>%
+  dplyr::left_join(
+    rl000094_members %>%
+      dplyr::select(
+        TE_ID,
+        Five_Prime_Family_ID,
+        UMR_Status
+      ),
+    by = "TE_ID"
+  ) %>%
+  dplyr::left_join(
+    metadata %>%
+      tibble::rownames_to_column(
+        "Sample_ID"
+      ) %>%
+      dplyr::select(
+        Sample_ID,
+        Condition
+      ),
+    by = "Sample_ID"
+  )
+
+rl000094_heat_expression <- rl000094_expression_long %>%
+  dplyr::filter(
+    tolower(Condition) == "heat"
+  ) %>%
+  dplyr::group_by(
+    TE_ID,
+    Five_Prime_Family_ID,
+    UMR_Status
+  ) %>%
+  dplyr::summarise(
+    Mean_Heat_Expression = mean(
+      Expression,
+      na.rm = TRUE
+    ),
+    .groups = "drop"
+  ) %>%
+  dplyr::mutate(
+    Five_Prime_Family_ID = factor(
+      Five_Prime_Family_ID,
+      levels = family_levels
+    ),
+
+    UMR_Status = factor(
+      UMR_Status,
+      levels = c(
+        "No UMR overlap",
+        "UMR overlap"
+      )
+    )
+  )
+
+# ==============================================================================
+# 13. WILCOXON TEST FOR PANEL C
+# ==============================================================================
+
+heat_expression_test <- stats::wilcox.test(
+  Mean_Heat_Expression ~ Five_Prime_Family_ID,
+  data = rl000094_heat_expression,
+  exact = FALSE
+)
+
+heat_expression_p <- heat_expression_test$p.value
+
+cat(
+  "\n============================================================\n",
+  "RL000094 HEAT EXPRESSION TEST\n",
+  "============================================================\n",
+  "W = ",
+  unname(heat_expression_test$statistic),
+  "\n",
+  "p = ",
+  signif(heat_expression_p, 4),
+  "\n",
+  sep = ""
+)
+
+# ==============================================================================
+# 14. GROUP MEDIANS FOR PANEL C
+# ==============================================================================
+
+rl000094_heat_medians <- rl000094_heat_expression %>%
+  dplyr::group_by(
+    Five_Prime_Family_ID
+  ) %>%
+  dplyr::summarise(
+    Median_Heat_Expression = median(
+      Mean_Heat_Expression,
+      na.rm = TRUE
+    ),
+    .groups = "drop"
+  )
+
+heat_min <- min(
+  rl000094_heat_expression$Mean_Heat_Expression,
+  na.rm = TRUE
+)
+
+heat_max <- max(
+  rl000094_heat_expression$Mean_Heat_Expression,
+  na.rm = TRUE
+)
+
+heat_range <- heat_max - heat_min
+
+if (!is.finite(heat_range) || heat_range == 0) {
+  heat_range <- 1
+}
+
+bracket_y <- heat_max + 0.10 * heat_range
+bracket_tip <- bracket_y - 0.05 * heat_range
+text_y <- bracket_y + 0.06 * heat_range
+
+# ==============================================================================
+# 15. PANEL C — MEAN HEAT EXPRESSION
+# ==============================================================================
+
+pC <- ggplot2::ggplot(
+  rl000094_heat_expression,
+  ggplot2::aes(
+    x = Five_Prime_Family_ID,
+    y = Mean_Heat_Expression
+  )
+) +
+
+  ggplot2::geom_point(
+    ggplot2::aes(
+      color = Five_Prime_Family_ID,
+      shape = UMR_Status
+    ),
+    position = ggplot2::position_jitter(
+      width = 0.07,
+      height = 0,
+      seed = 123
+    ),
+    size = 3.4,
+    stroke = 1.1,
+    alpha = 0.95
+  ) +
+
+  ggplot2::geom_crossbar(
+    data = rl000094_heat_medians,
+    ggplot2::aes(
+      x = Five_Prime_Family_ID,
+      y = Median_Heat_Expression,
+      ymin = Median_Heat_Expression,
+      ymax = Median_Heat_Expression,
+      color = Five_Prime_Family_ID
+    ),
+    inherit.aes = FALSE,
+    width = 0.42,
+    linewidth = 0.9
+  ) +
+
+  # p-value bracket
+  ggplot2::annotate(
+    "segment",
+    x = 1,
+    xend = 2,
+    y = bracket_y,
+    yend = bracket_y,
+    linewidth = 0.6
+  ) +
+
+  ggplot2::annotate(
+    "segment",
+    x = 1,
+    xend = 1,
+    y = bracket_y,
+    yend = bracket_tip,
+    linewidth = 0.6
+  ) +
+
+  ggplot2::annotate(
+    "segment",
+    x = 2,
+    xend = 2,
+    y = bracket_y,
+    yend = bracket_tip,
+    linewidth = 0.6
+  ) +
+
+  ggplot2::annotate(
+    "text",
+    x = 1.5,
+    y = text_y,
+    label = paste0(
+      "p = ",
+      format.pval(
+        heat_expression_p,
+        digits = 3,
+        eps = 0.001
+      )
+    ),
+    size = 3.7
+  ) +
+
+  ggplot2::scale_color_manual(
+    values = rl000094_colors,
+    name = "5' LTR family"
+  ) +
+
+  ggplot2::scale_shape_manual(
+    values = c(
+      "No UMR overlap" = 1,
+      "UMR overlap" = 16
+    ),
+    name = "UMR status"
+  ) +
+
+  ggplot2::scale_y_continuous(
+    expand = ggplot2::expansion(
+      mult = c(0.04, 0.18)
+    )
+  ) +
+
+  ggplot2::labs(
+    x = "5' LTR family",
+    y = "Mean heat expression\nlog2(CPM + 1)"
+  ) +
+
+  ggplot2::theme_classic(
+    base_size = 11
+  ) +
+
+  ggplot2::theme(
+    axis.title = ggplot2::element_text(
+      face = "bold"
+    ),
+
+    axis.text.x = ggplot2::element_text(
+      face = "bold"
+    ),
+
+    legend.position = "top",
+
+    legend.box = "vertical",
+
+    legend.box.just = "left",
+
+    legend.title = ggplot2::element_text(
+      face = "bold"
+    )
+  ) +
+
+  ggplot2::guides(
+    color = ggplot2::guide_legend(
+      title = "5' LTR family",
+      order = 1
+    ),
+
+    shape = ggplot2::guide_legend(
+      title = "UMR status",
+      order = 2,
+      override.aes = list(
+        color = "black"
+      )
+    )
+  )
+
+# ==============================================================================
+# 16. COMBINE PANELS
+#
+# Widths reproduce the overall structure of slide 6 while leaving additional
+# room for Panel C and its legends.
+# ==============================================================================
+
+figure6 <-
+  pA +
+  pB +
+  pC +
+  patchwork::plot_layout(
+    widths = c(
+      0.9,
+      0.8,
+      1.25
+    )
+  ) +
+  patchwork::plot_annotation(
+    tag_levels = "A"
+  ) &
+  ggplot2::theme(
+    plot.tag = ggplot2::element_text(
+      face = "bold",
+      size = 23
+    ),
+    plot.tag.position = c(
+      0.01,
+      0.99
+    )
+  )
+
+print(
+  figure6
+)
+
+# ==============================================================================
+# 17. SAVE FIGURE
+# ==============================================================================
+
+ggplot2::ggsave(
+  filename = file.path(
+    figure6_output_dir,
+    "Figure6_RL000094_UMR_heat_expression.jpeg"
+  ),
+  plot = figure6,
+  width = 12,
+  height = 5.2,
+  units = "in",
+  dpi = 600,
+  bg = "white"
+)
+
+ggplot2::ggsave(
+  filename = file.path(
+    figure6_output_dir,
+    "Figure6_RL000094_UMR_heat_expression.pdf"
+  ),
+  plot = figure6,
+  width = 12,
+  height = 5.2,
+  units = "in",
+  bg = "white"
+)
+
+# ==============================================================================
+# 18. SAVE FIGURE-SPECIFIC DATA / STATISTICS
+# ==============================================================================
+
+readr::write_tsv(
+  rl000094_plot_summary,
+  file.path(
+    figure6_output_dir,
+    "Figure6_RL000094_UMR_summary.tsv"
+  )
+)
+
+readr::write_tsv(
+  rl000094_heat_expression,
+  file.path(
+    figure6_output_dir,
+    "Figure6_RL000094_heat_expression.tsv"
+  )
+)
+
+figure6_statistics <- tibble::tibble(
+  Comparison =
+    "RL000099 vs RL000584 mean heat expression",
+  Test =
+    "Wilcoxon rank-sum test",
+  W =
+    unname(
+      heat_expression_test$statistic
+    ),
+  P_value =
+    heat_expression_p
+)
+
+readr::write_tsv(
+  figure6_statistics,
+  file.path(
+    figure6_output_dir,
+    "Figure6_statistics.tsv"
+  )
+)
+
+cat(
+  "\n============================================================\n",
+  "FIGURE 6 COMPLETE\n",
+  "============================================================\n",
+  "\nJPEG:\n",
+  file.path(
+    figure6_output_dir,
+    "Figure6_RL000094_UMR_heat_expression.jpeg"
+  ),
+  "\n\nPDF:\n",
+  file.path(
+    figure6_output_dir,
+    "Figure6_RL000094_UMR_heat_expression.pdf"
+  ),
+  "\n",
+  sep = ""
+)
+
+```
+
+

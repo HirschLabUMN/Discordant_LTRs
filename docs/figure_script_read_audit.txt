@@ -1,0 +1,4 @@
+AUDIT: Review each read/load/source call in your final Figure1-6 scripts.
+This is a discovery aid, NOT a proof that every input has been collected.
+Relative paths, paste0(), file.path(), variables, and generated intermediate objects need manual checking.
+

@@ -1,0 +1,768 @@
+---
+title: "figure1_complete_final"
+output: html_document
+date: "2026-09-22"
+---
+
+```{r}
+# Common setup ---------------------------------------------------------------
+suppressPackageStartupMessages({
+  library(data.table); library(dplyr); library(tidyr); library(ggplot2)
+  library(scales); library(patchwork)
+})
+
+b73_full_path <- "/projects/standard/hirschc1/menar060/family_analysis/redo_full_sequence/B73/output/B73_full_sequence_silix.out"
+b73_5prime_path <- "/projects/standard/hirschc1/menar060/family_analysis/redo_five_prime/B73/output/B73_five_prime_silix.out"
+setaria_full_path <- "/projects/standard/hirschc1/menar060/family_analysis/redo_full_sequence/Setaria/output/Milhouse_plus_full_sequence_silix.out"
+setaria_5prime_path <- "/projects/standard/hirschc1/menar060/family_analysis/redo_five_prime/Setaria/output/Milhouse_plus_five_prime_silix.out"
+
+output_dir <- "final_panel_figures"
+dir.create(output_dir, showWarnings=FALSE, recursive=TRUE)
+
+divergent_palette <- c("#27408B","#1B9E77","#2AA198","#56B4E9",
+                       "#E6AB02","#D55E6A","#984EA3","#7F1D3A")
+status_colors <- c("Clustering concordance"=divergent_palette[1],
+                   "Clustering discordance"=divergent_palette[8])
+discordance_type_colors <- c(
+  "Concordant"=divergent_palette[1],
+  "Merge-associated"=divergent_palette[5],
+  "Split-and-merge"=divergent_palette[8],
+  "Split-associated"=divergent_palette[7]
+)
+
+publication_theme <- theme_classic(base_size=10) +
+  theme(axis.title=element_text(face="bold"),
+        strip.text=element_text(face="bold"),
+        legend.title=element_text(face="bold"))
+
+extract_silix_attribute <- function(x, attribute_name) {
+  pattern <- paste0("(?:^|;)", attribute_name, "=([^;]+)")
+  out <- sub(paste0(".*", pattern, ".*"), "\\1", as.character(x), perl=TRUE)
+  out[!grepl(pattern, as.character(x), perl=TRUE)] <- NA_character_
+  out
+}
+
+# ------------------------------------------------------------------------------
+# Species-specific structural-TE matching
+#
+# IMPORTANT:
+#   Maize and Setaria both have lLTR_ added to 5′ LTR IDs, but Setaria full
+#   structural IDs are heterogeneous. Therefore the same literal replacement
+#   cannot be used for both species.
+#
+#   Maize:
+#     lLTR_51885 -> LTRRT_51885
+#
+#   Setaria:
+#     lLTR_RLCS... -> RLCS...
+#     lLTR_RLGS... -> RLGS...
+#     lLTR_RLXS... -> LTRRT_RLXS... when that is the full-sequence ID
+#
+#   For Setaria, both candidate parent IDs are tested against the IDs actually
+#   present in the full-sequence SiLiX file. This is the recovery strategy that
+#   retains the complete structural-LTR set rather than the erroneous ~72 TEs.
+# ------------------------------------------------------------------------------
+
+read_assignments <- function(full_path, five_path, species) {
+
+  f <- fread(
+    full_path, header=FALSE, sep="\t", select=1:2,
+    col.names=c("Family_ID","Element_ID")
+  )
+  l <- fread(
+    five_path, header=FALSE, sep="\t", select=1:2,
+    col.names=c("Family_ID","Element_ID")
+  )
+
+  ff <- f %>%
+    mutate(
+      TE_ID = extract_silix_attribute(Element_ID, "ID"),
+      Full_Seq_Family = paste0(species, "_Full_", Family_ID)
+    ) %>%
+    filter(!is.na(TE_ID)) %>%
+    distinct(TE_ID, .keep_all=TRUE) %>%
+    select(TE_ID, Full_Seq_Family)
+
+  five_raw <- l %>%
+    mutate(
+      Five_Prime_LTR_ID = extract_silix_attribute(Element_ID, "ID"),
+      Five_Prime_Family = paste0(species, "_5prime_", Family_ID)
+    ) %>%
+    filter(!is.na(Five_Prime_LTR_ID))
+
+  if (species == "B73") {
+
+    ll <- five_raw %>%
+      mutate(
+        TE_ID = sub("^lLTR_", "LTRRT_", Five_Prime_LTR_ID)
+      )
+
+  } else if (species == "Setaria") {
+
+    full_setaria_ids <- unique(ff$TE_ID)
+
+    ll <- five_raw %>%
+      mutate(
+        Candidate_TE_ID_1 = sub("^lLTR_", "", Five_Prime_LTR_ID),
+        Candidate_TE_ID_2 = paste0("LTRRT_", Candidate_TE_ID_1),
+
+        Candidate_1_Matches = Candidate_TE_ID_1 %in% full_setaria_ids,
+        Candidate_2_Matches = Candidate_TE_ID_2 %in% full_setaria_ids,
+
+        TE_ID = case_when(
+          Candidate_1_Matches ~ Candidate_TE_ID_1,
+          Candidate_2_Matches ~ Candidate_TE_ID_2,
+          TRUE ~ NA_character_
+        )
+      )
+
+  } else {
+    stop("Unknown species: ", species)
+  }
+
+  ll <- ll %>%
+    filter(!is.na(TE_ID)) %>%
+    distinct(TE_ID, .keep_all=TRUE) %>%
+    select(TE_ID, Five_Prime_Family)
+
+  joined <- inner_join(ff, ll, by="TE_ID") %>%
+    mutate(Species=species)
+
+  cat(
+    "\n================ ", species, " ID CHECK ================\n",
+    "Full-sequence unique structural TEs: ", scales::comma(n_distinct(ff$TE_ID)), "\n",
+    "Recovered 5′ LTR structural TEs:     ", scales::comma(n_distinct(ll$TE_ID)), "\n",
+    "Shared TEs used in Figure 1:         ", scales::comma(n_distinct(joined$TE_ID)), "\n",
+    sep=""
+  )
+
+  # Hard guards: do not silently make a figure from a catastrophically
+  # incomplete join.
+  if (species == "B73" && n_distinct(joined$TE_ID) < 50000) {
+    stop(
+      "Maize structural-TE recovery failed: fewer than 50,000 shared TEs. ",
+      "Do not use the figure."
+    )
+  }
+
+  if (species == "Setaria" && n_distinct(joined$TE_ID) < 500) {
+    stop(
+      "Setaria structural-TE recovery failed: fewer than 500 shared TEs. ",
+      "Do not use the figure."
+    )
+  }
+
+  joined
+}
+
+classify <- function(x) {
+  # Pair counts
+  pairs <- x %>%
+    count(Species, Full_Seq_Family, Five_Prime_Family, name="pair_size")
+
+  # Unique largest overlap in the full-sequence direction
+  pairs <- pairs %>%
+    group_by(Species, Full_Seq_Family) %>%
+    mutate(
+      full_family_size = sum(pair_size),
+      full_partner_count = n_distinct(Five_Prime_Family),
+      Largest_Pair_in_Full = max(pair_size),
+      Number_Tied_for_Full_Max = sum(pair_size == Largest_Pair_in_Full),
+      Unique_Full_Maximum =
+        pair_size == Largest_Pair_in_Full &
+        Number_Tied_for_Full_Max == 1
+    ) %>%
+    ungroup()
+
+  # Unique largest overlap in the 5′ LTR direction
+  pairs <- pairs %>%
+    group_by(Species, Five_Prime_Family) %>%
+    mutate(
+      five_prime_family_size = sum(pair_size),
+      five_partner_count = n_distinct(Full_Seq_Family),
+      Largest_Pair_in_Five = max(pair_size),
+      Number_Tied_for_Five_Max = sum(pair_size == Largest_Pair_in_Five),
+      Unique_Five_Maximum =
+        pair_size == Largest_Pair_in_Five &
+        Number_Tied_for_Five_Max == 1
+    ) %>%
+    ungroup() %>%
+    mutate(
+      # TE-level status used in Panel C
+      Mutual_Unique_Largest =
+        Unique_Full_Maximum & Unique_Five_Maximum,
+      Pair_Status = if_else(
+        Mutual_Unique_Largest,
+        "Clustering concordance",
+        "Clustering discordance"
+      ),
+
+      # Exact 1:1 relationship used for family-level status
+      Exact_One_to_One_Match =
+        full_partner_count == 1 &
+        five_partner_count == 1 &
+        pair_size == full_family_size &
+        pair_size == five_prime_family_size,
+
+      Discordance_Type = case_when(
+        Exact_One_to_One_Match ~ "Concordant",
+        full_partner_count > 1 & five_partner_count == 1 ~ "Split-associated",
+        full_partner_count == 1 & five_partner_count > 1 ~ "Merge-associated",
+        full_partner_count > 1 & five_partner_count > 1 ~ "Split-and-merge",
+        TRUE ~ "Split-and-merge"
+      )
+    )
+
+  # Join the TE-level classification back to every TE
+  el <- x %>%
+    left_join(
+      pairs %>%
+        select(
+          Species, Full_Seq_Family, Five_Prime_Family,
+          pair_size, full_family_size, five_prime_family_size,
+          full_partner_count, five_partner_count,
+          Mutual_Unique_Largest, Pair_Status,
+          Exact_One_to_One_Match, Discordance_Type
+        ),
+      by=c("Species","Full_Seq_Family","Five_Prime_Family")
+    )
+
+  # Family-level classification used in Panel B.
+  # Each family is counted once under each clustering definition.
+  fullfam <- pairs %>%
+    group_by(Species, Full_Seq_Family) %>%
+    summarise(
+      Method="Full sequence",
+      Family=first(Full_Seq_Family),
+      family_size=first(full_family_size),
+      Status=if_else(
+        n_distinct(Five_Prime_Family) == 1 &
+        all(Exact_One_to_One_Match),
+        "Clustering concordance",
+        "Clustering discordance"
+      ),
+      .groups="drop"
+    )
+
+  fivefam <- pairs %>%
+    group_by(Species, Five_Prime_Family) %>%
+    summarise(
+      Method="5′ LTR",
+      Family=first(Five_Prime_Family),
+      family_size=first(five_prime_family_size),
+      Status=if_else(
+        n_distinct(Full_Seq_Family) == 1 &
+        all(Exact_One_to_One_Match),
+        "Clustering concordance",
+        "Clustering discordance"
+      ),
+      .groups="drop"
+    )
+
+  list(
+    elements=el,
+    pairs=pairs,
+    families=bind_rows(fullfam,fivefam)
+  )
+}
+
+b73 <- classify(read_assignments(b73_full_path,b73_5prime_path,"B73"))
+setaria <- classify(read_assignments(setaria_full_path,setaria_5prime_path,"Setaria"))
+combined_elements <- bind_rows(b73$elements,setaria$elements)
+combined_pairs <- bind_rows(b73$pairs,setaria$pairs)
+combined_families <- bind_rows(b73$families,setaria$families)
+
+suppressPackageStartupMessages({library(ggalluvial); library(cowplot)})
+
+# A. Number of families -------------------------------------------------------
+family_counts <- combined_families %>%
+  count(Species,Method,name="Number_of_Families") %>%
+  mutate(
+    Species=factor(Species,c("B73","Setaria")),
+    Method=factor(Method,c("Full sequence","5′ LTR"))
+  )
+
+method_colors <- c(
+  "Full sequence"=divergent_palette[4],
+  "5′ LTR"=divergent_palette[7]
+)
+
+# IMPORTANT: free y scales are intentional here.
+# Maize and Setaria have very different absolute family counts, and the
+# separate axes make the similar proportional decrease visible.
+pA <- ggplot(
+  family_counts,
+  aes(Method,Number_of_Families,fill=Method)
+) +
+  geom_col(width=.68,color="black",linewidth=.45) +
+  geom_text(
+    aes(label=comma(Number_of_Families)),
+    vjust=-.35,size=3
+  ) +
+  facet_wrap(
+    ~Species,
+    scales="free_y",
+    axes="all_y",
+    labeller=as_labeller(c(B73="Maize",Setaria="Setaria"))
+  ) +
+  scale_fill_manual(values=method_colors) +
+  scale_y_continuous(
+    labels=comma,
+    breaks=scales::pretty_breaks(n=5),
+    expand=expansion(mult=c(0,.16))
+  ) +
+  labs(x=NULL,y="Number of TE families") +
+  publication_theme +
+  theme(
+    legend.position="none",
+    panel.spacing.x=unit(.45,"cm"),
+    axis.title.y=element_text(margin=margin(r=7)),
+    axis.text.x=element_text(size=7.5)
+  )
+
+# B. FAMILY-level concordance --------------------------------------------------
+# This matches Slide 1 Panel B: each family is counted once under its
+# clustering definition, and the two methods are pooled within species.
+family_prop <- combined_families %>%
+  count(Species,Status,name="n") %>%
+  group_by(Species) %>%
+  mutate(
+    total_n=sum(n),
+    prop=n/total_n,
+    inside_label=paste0(comma(n),"\n",percent(prop,accuracy=.1))
+  ) %>%
+  ungroup() %>%
+  mutate(Status=factor(
+    Status,
+    c("Clustering concordance","Clustering discordance")
+  ))
+
+family_totals <- family_prop %>%
+  distinct(Species,total_n) %>%
+  mutate(n_label=paste0("n = ",comma(total_n)," families"))
+
+pB <- ggplot(family_prop,aes(Species,prop,fill=Status)) +
+  geom_col(width=.62,color="black",linewidth=.45) +
+  geom_text(
+    aes(label=inside_label),
+    position=position_stack(vjust=.5),
+    color="white",fontface="bold",size=3
+  ) +
+  geom_text(
+    data=family_totals,
+    aes(x=Species,y=1.055,label=n_label),
+    inherit.aes=FALSE,
+    size=2.8
+  ) +
+  scale_fill_manual(values=status_colors,name=NULL) +
+  scale_x_discrete(labels=c(B73="Maize",Setaria="Setaria")) +
+  scale_y_continuous(
+    labels=label_percent(),
+    breaks=seq(0,1,.25),
+    limits=c(0,1.10),
+    expand=c(0,0)
+  ) +
+  labs(x=NULL,y="Proportion of TE families") +
+  publication_theme +
+  theme(
+    legend.position="top",
+    legend.text=element_text(size=7),
+    legend.key.size=unit(.32,"cm"),
+    legend.spacing.x=unit(.15,"cm")
+  ) +
+  guides(fill=guide_legend(nrow=1,byrow=TRUE))
+
+# C. INDIVIDUAL-TE concordance -------------------------------------------------
+# IMPORTANT: classification logic is unchanged from the supplied Figure 1
+# script. Only structural-TE ID recovery was corrected above.
+# TE-level concordance uses the mutually-unique-largest-overlap definition.
+te_prop <- combined_elements %>%
+  distinct(Species,TE_ID,.keep_all=TRUE) %>%
+  count(Species,Pair_Status,name="n") %>%
+  group_by(Species) %>%
+  mutate(
+    total_n=sum(n),
+    prop=n/total_n,
+    inside_label=paste0(comma(n),"\n",percent(prop,accuracy=.1))
+  ) %>%
+  ungroup() %>%
+  mutate(Pair_Status=factor(
+    Pair_Status,
+    c("Clustering concordance","Clustering discordance")
+  ))
+
+te_totals <- te_prop %>%
+  distinct(Species,total_n) %>%
+  mutate(n_label=paste0("n = ",comma(total_n)," TEs"))
+
+pC <- ggplot(te_prop,aes(Species,prop,fill=Pair_Status)) +
+  geom_col(width=.62,color="black",linewidth=.45) +
+  geom_text(
+    aes(label=inside_label),
+    position=position_stack(vjust=.5),
+    color="white",fontface="bold",size=3
+  ) +
+  geom_text(
+    data=te_totals,
+    aes(x=Species,y=1.055,label=n_label),
+    inherit.aes=FALSE,
+    size=2.8
+  ) +
+  scale_fill_manual(values=status_colors,name=NULL) +
+  scale_x_discrete(labels=c(B73="Maize",Setaria="Setaria")) +
+  scale_y_continuous(
+    labels=label_percent(),
+    breaks=seq(0,1,.25),
+    limits=c(0,1.10),
+    expand=c(0,0)
+  ) +
+  labs(x=NULL,y="Proportion of individual TEs") +
+  publication_theme +
+  theme(legend.position="none")
+
+# D. Direction-neutral topology by Small / Medium / Large ---------------------
+suppressPackageStartupMessages(library(igraph))
+
+topology_edges <- combined_pairs %>%
+  transmute(
+    Species,Full_Seq_Family,Five_Prime_Family,pair_size,
+    Full_Node=paste0(Species,"::FULL::",Full_Seq_Family),
+    Five_Node=paste0(Species,"::FIVE::",Five_Prime_Family)
+  )
+
+family_graph <- igraph::graph_from_data_frame(
+  topology_edges %>% select(Full_Node,Five_Node),
+  directed=FALSE
+)
+
+graph_components <- igraph::components(family_graph)
+
+node_component_lookup <- tibble::tibble(
+  Node=names(graph_components$membership),
+  Component_ID=as.integer(graph_components$membership)
+)
+
+topology_edges <- topology_edges %>%
+  left_join(
+    node_component_lookup %>% rename(Full_Node=Node),
+    by="Full_Node"
+  )
+
+if(any(is.na(topology_edges$Component_ID))) {
+  stop("Some family pairs could not be assigned to a connected component.")
+}
+
+component_topology <- topology_edges %>%
+  group_by(Species,Component_ID) %>%
+  summarise(
+    Number_of_TEs=sum(pair_size),
+    Number_of_Full_Families=n_distinct(Full_Seq_Family),
+    Number_of_Five_Prime_Families=n_distinct(Five_Prime_Family),
+    .groups="drop"
+  ) %>%
+  mutate(
+    Topology=case_when(
+      Number_of_Full_Families==1 & Number_of_Five_Prime_Families==1 ~
+        "Concordant",
+      Number_of_Full_Families==1 & Number_of_Five_Prime_Families>1 ~
+        "Split-associated",
+      Number_of_Full_Families>1 & Number_of_Five_Prime_Families==1 ~
+        "Merge-associated",
+      Number_of_Full_Families>1 & Number_of_Five_Prime_Families>1 ~
+        "Split-and-merge",
+      TRUE ~ NA_character_
+    ),
+    Size_Category=case_when(
+      Number_of_TEs<=10 ~ "Small",
+      Number_of_TEs<=100 ~ "Medium",
+      Number_of_TEs>100 ~ "Large",
+      TRUE ~ NA_character_
+    ),
+    Species=factor(Species,c("B73","Setaria")),
+    Size_Category=factor(
+      Size_Category,
+      c("Small","Medium","Large"),
+      labels=c("Small\n(≤10 TEs)","Medium\n(11–100 TEs)","Large\n(>100 TEs)")
+    ),
+    Topology=factor(
+      Topology,
+      c("Concordant","Merge-associated","Split-and-merge","Split-associated")
+    )
+  )
+
+topology_by_size_df <- component_topology %>%
+  count(
+    Species,Size_Category,Topology,
+    name="Number_of_Relationships",
+    .drop=FALSE
+  ) %>%
+  group_by(Species,Size_Category) %>%
+  mutate(
+    Total_Relationships=sum(Number_of_Relationships),
+    Proportion=if_else(
+      Total_Relationships>0,
+      Number_of_Relationships/Total_Relationships,
+      NA_real_
+    )
+  ) %>%
+  ungroup() %>%
+  filter(Total_Relationships>0)
+
+relationship_size_labels <- topology_by_size_df %>%
+  distinct(Species,Size_Category,Total_Relationships) %>%
+  mutate(Label=paste0("n = ",comma(Total_Relationships)))
+
+topology_colors_direction_neutral <- c(
+  "Concordant"=divergent_palette[1],
+  "Split-associated"=divergent_palette[3],
+  "Merge-associated"=divergent_palette[5],
+  "Split-and-merge"=divergent_palette[8]
+)
+
+pD <- ggplot(
+  topology_by_size_df,
+  aes(Size_Category,Proportion,fill=Topology)
+) +
+  geom_col(width=.65,color="black",linewidth=.4) +
+  geom_text(
+    aes(label=if_else(
+      !is.na(Proportion) & Proportion>=.04,
+      percent(Proportion,accuracy=.1),
+      ""
+    )),
+    position=position_stack(vjust=.5),
+    color="white",
+    fontface="bold",
+    size=2.55
+  ) +
+  geom_text(
+    data=relationship_size_labels,
+    aes(Size_Category,1.045,label=Label),
+    inherit.aes=FALSE,
+    size=2.35
+  ) +
+  facet_wrap(
+    ~Species,
+    nrow=1,
+    labeller=as_labeller(c(B73="Maize",Setaria="Setaria"))
+  ) +
+  scale_fill_manual(
+    values=topology_colors_direction_neutral,
+    breaks=c(
+      "Concordant",
+      "Merge-associated",
+      "Split-and-merge",
+      "Split-associated"
+    ),
+    drop=FALSE,
+    name=NULL
+  ) +
+  scale_y_continuous(
+    limits=c(0,1.10),
+    breaks=seq(0,1,.25),
+    labels=label_percent(),
+    expand=c(0,0)
+  ) +
+  labs(
+    x="Relationship size",
+    y="Proportion of family relationships"
+  ) +
+  publication_theme +
+  theme(
+    # Two-row legend prevents it from running off the right edge.
+    legend.position="top",
+    legend.justification="left",
+    legend.box.just="left",
+    legend.text=element_text(size=5.7),
+    legend.key.size=unit(.27,"cm"),
+    legend.spacing.x=unit(.10,"cm"),
+    panel.spacing.x=unit(.30,"cm"),
+    axis.text.x=element_text(
+      size=6.2,
+      lineheight=.88,
+      margin=margin(t=4)
+    ),
+    axis.title.x=element_text(
+      size=8.5,
+      face="bold",
+      margin=margin(t=9)
+    ),
+    axis.title.y=element_text(
+      size=8.5,
+      face="bold",
+      margin=margin(r=6)
+    ),
+    strip.text=element_text(size=8.5,face="bold"),
+    plot.margin=margin(3,4,8,4)
+  ) +
+  guides(
+    fill=guide_legend(
+      nrow=2,
+      byrow=TRUE,
+      title.position="top"
+    )
+  )
+
+# E/F. Top-10 full-sequence-family alluvials ----------------------------------
+suppressPackageStartupMessages(library(ggalluvial))
+top_n <- 10
+
+make_top_alluvial <- function(results_object,species_label) {
+
+  top_full_ids <- results_object$families %>%
+    filter(Method=="Full sequence") %>%
+    arrange(desc(family_size)) %>%
+    slice_head(n=top_n) %>%
+    pull(Family)
+
+  alluvial_top_df <- results_object$pairs %>%
+    filter(Full_Seq_Family %in% top_full_ids) %>%
+    mutate(
+      Discordance_Type=factor(
+        Discordance_Type,
+        levels=c(
+          "Concordant",
+          "Merge-associated",
+          "Split-and-merge",
+          "Split-associated"
+        )
+      )
+    )
+
+  if(nrow(alluvial_top_df)==0) {
+    stop(paste("No alluvial data found for",species_label))
+  }
+
+  ggplot(
+    alluvial_top_df,
+    aes(
+      axis1=Full_Seq_Family,
+      axis2=Five_Prime_Family,
+      y=pair_size
+    )
+  ) +
+    ggalluvial::geom_alluvium(
+      aes(fill=Discordance_Type),
+      width=.22,
+      alpha=.85,
+      color="white",
+      linewidth=.2
+    ) +
+    ggalluvial::geom_stratum(
+      width=.22,
+      fill="white",
+      color="black",
+      linewidth=.5
+    ) +
+    scale_fill_manual(
+      values=topology_colors_direction_neutral,
+      breaks=c(
+        "Concordant",
+        "Merge-associated",
+        "Split-and-merge",
+        "Split-associated"
+      ),
+      drop=FALSE,
+      name="Classification relationship"
+    ) +
+    scale_x_discrete(
+      limits=c("Full-sequence families","5′ LTR families"),
+      expand=c(.08,.08)
+    ) +
+    labs(
+      title=species_label,
+      x=NULL,
+      y="Number of TEs"
+    ) +
+    publication_theme +
+    theme(
+      axis.line.x=element_blank(),
+      axis.ticks.x=element_blank(),
+      legend.position="none",
+      plot.title=element_text(
+        hjust=.5,
+        face="bold",
+        size=10,
+        margin=margin(b=6)
+      ),
+      axis.text.x=element_text(
+        size=7,
+        margin=margin(t=7)
+      ),
+      axis.text.y=element_text(size=7),
+      axis.title.y=element_text(
+        size=8.5,
+        face="bold",
+        margin=margin(r=6)
+      ),
+      plot.margin=margin(4,8,12,8)
+    )
+}
+
+pE <- make_top_alluvial(b73,"Maize")
+pF <- make_top_alluvial(setaria,"Setaria")
+
+# Final six-panel figure -------------------------------------------------------
+figure1 <- (
+  (pA | pB) /
+  (pC | pD) /
+  (pE | pF)
+) +
+  plot_layout(
+    heights=c(.92,1.12,1.40)
+  ) +
+  plot_annotation(tag_levels="A") &
+  theme(
+    plot.tag=element_text(face="bold",size=12),
+    plot.tag.position=c(.01,.99),
+    plot.margin=margin(4,6,6,6)
+  )
+
+# Slightly wider output gives Panel D and the alluvial x labels enough room.
+ggsave(
+  file.path(output_dir,"Figure1_full_panel_FIXED_SPECIES_IDS.jpeg"),
+  figure1,
+  width=8.5,
+  height=9.4,
+  units="in",
+  dpi=600,
+  bg="white"
+)
+
+ggsave(
+  file.path(output_dir,"Figure1_full_panel_FIXED_SPECIES_IDS.pdf"),
+  figure1,
+  width=8.5,
+  height=9.4,
+  units="in",
+  bg="white"
+)
+
+# Validation output ------------------------------------------------------------
+cat("\n================ PANEL A ================\n")
+print(family_counts,n=Inf)
+
+cat("\n================ PANEL B ================\n")
+print(family_prop,n=Inf)
+print(family_totals,n=Inf)
+
+cat("\n================ PANEL C ================\n")
+print(te_prop,n=Inf)
+
+cat("\n================ PANEL D ================\n")
+print(topology_by_size_df,n=Inf)
+
+cat("\nExpected Panel C structural-TE totals:\n")
+cat("Maize: 51,826 TEs total\n")
+cat("Setaria: approximately 604 TEs total\n")
+cat("The script already stops upstream if Maize <50,000 or Setaria <500.\n")
+
+print(figure1)
+```
+
+
+```
+
+
+```
+
